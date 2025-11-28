@@ -140,6 +140,10 @@ def run_pipeline(
     w_benford: float = 1.0,
 ):
     df = _ensure_columns(df_raw)
+        
+    for col in ["sales", "ar", "inventory", "total_assets", "ocf", "net_income"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
 
     df = df.reset_index(drop=True)
     df["row_id"] = df.index + 1
