@@ -581,46 +581,48 @@ with tab3:
         )
     else:
         st.warning(
-            "⚠️ 해당 데이터는 Benford 법칙을 적용하기에 적절하지 않을 수 있습니다.\n\n"
+            "⚠️ 본 데이터 집합은 Benford 법칙을 적용하기에 적절하지 않을 수 있습니다.\n\n"
             f"사유: {reason}"
         )
 
     if dist:
-    obs = dist.get("obs")
-    exp = dist.get("exp")
-    if obs is not None and exp is not None and len(obs) == 9:
-        digits = np.arange(1, 10)
-        width = 0.35
+        obs = dist.get("obs")
+        exp = dist.get("exp")
+        if obs is not None and exp is not None and len(obs) == 9:
+            digits = np.arange(1, 10)
+            width = 0.35
 
-        mad_val = dist.get("mad", np.nan)
-        if np.isnan(mad_val):
-            mad_level = "판단불가"
-        elif mad_val < 0.006:
-            mad_level = "매우 양호"
-        elif mad_val < 0.012:
-            mad_level = "양호"
-        elif mad_val < 0.015:
-            mad_level = "주의"
+            mad_val = dist.get("mad", np.nan)
+            if np.isnan(mad_val):
+                mad_level = "판단불가"
+            elif mad_val < 0.006:
+                mad_level = "매우 양호"
+            elif mad_val < 0.012:
+                mad_level = "양호"
+            elif mad_val < 0.015:
+                mad_level = "주의"
+            else:
+                mad_level = "높은 이상징후"
+
+            fig, ax = plt.subplots()
+            ax.bar(digits - width / 2, exp, width, label="이론(베니포드)")
+            ax.bar(digits + width / 2, obs, width, label="실제(매출)")
+            ax.set_xticks(digits)
+            ax.set_xlabel("선두 자릿수")
+            ax.set_ylabel("비율")
+            ax.set_title(f"선두 자릿수 분포 비교 (MAD={mad_val:.4f}, {mad_level})")
+            ax.legend()
+            st.pyplot(fig)
+
+            st.caption(
+                "그래프는 전체 매출 데이터를 한 번에 모아, 선두 숫자 분포가 "
+                "이론적 Benford 분포와 얼마나 다른지 보여줍니다. "
+                "표본 수가 적거나 금액 범위가 좁으면 신뢰도가 떨어질 수 있습니다."
+            )
         else:
-            mad_level = "높은 이상징후"
-
-        fig, ax = plt.subplots()
-        ax.bar(digits - width / 2, exp, width, label="이론(베니포드)")
-        ax.bar(digits + width / 2, obs, width, label="실제(매출)")
-        ax.set_xticks(digits)
-        ax.set_xlabel("선두 자릿수")
-        ax.set_ylabel("비율")
-        ax.set_title(f"선두 자릿수 분포 비교 (MAD={mad_val:.4f}, {mad_level})")
-        ax.legend()
-        st.pyplot(fig)
-
-        st.caption(
-            "그래프는 전체 매출 데이터를 한 번에 모아, 선두 숫자 분포가 "
-            "이론적 Benford 분포와 얼마나 다른지 보여줍니다. "
-            "표본 수가 적거나 금액 범위가 좁으면 신뢰도가 떨어질 수 있습니다."
-        )
+            st.info("Benford 분포를 그릴 수 있는 데이터가 부족합니다.")
     else:
-        st.info("Benford 분포를 그릴 수 있는 정보가 부족합니다.")
+        st.info("Benford 분포를 그릴 수 있는 데이터가 부족합니다.")
 
     st.markdown("---")
     st.markdown(
