@@ -6,8 +6,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from fraud_detect_core import run_pipeline
-
 st.set_page_config(
     page_title="회계 이상 탐지 대시보드 · 강화판",
     layout="wide",
