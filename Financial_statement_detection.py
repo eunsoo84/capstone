@@ -166,13 +166,14 @@ def run_pipeline(
 
     def zscore_group(g: pd.DataFrame, cols: list):
         g = g.copy()
-        for c in cols:
-            m = g[c].mean()
-            s = g[c].std(ddof=0)
+         for c in cols:
+            col_name = str(c)
+            m = g[col_name].mean()
+            s = g[col_name].std(ddof=0)
             if s is None or s == 0 or np.isnan(s):
-                g[c + "_z"] = 0.0
+                g[col_name + "_z"] = 0.0
             else:
-                g[c + "_z"] = (g[c] - m) / s
+                g[col_name + "_z"] = (g[col_name] - m) / s
         return g
 
     if group_mode == "year":
