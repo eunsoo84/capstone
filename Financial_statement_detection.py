@@ -166,7 +166,7 @@ def run_pipeline(
 
     def zscore_group(g: pd.DataFrame, cols: list):
         g = g.copy()
-         for c in cols:
+        for c in cols:
             col_name = str(c)
             m = g[col_name].mean()
             s = g[col_name].std(ddof=0)
