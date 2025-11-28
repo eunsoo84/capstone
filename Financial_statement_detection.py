@@ -464,31 +464,31 @@ with tab2:
             sel_comp = st.selectbox("기준 회사 선택", companies, key="peer_comp")
 
             focus = subset[subset["company"] == sel_comp].copy()
-if focus.empty:
-    st.warning("선택한 회사 데이터가 없습니다.")
-else:
-    eps = 1e-9
-    subset["size_metric"] = np.log1p(subset["total_assets"])
-    subset["growth_metric"] = subset["sales_yoy"].fillna(0.0)
-    subset["profit_metric"] = (
-        subset["net_income"] / (subset["sales"] + eps)
-    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            if focus.empty:
+                st.warning("선택한 회사 데이터가 없습니다.")
+            else:
+                eps = 1e-9
+                subset["size_metric"] = np.log1p(subset["total_assets"])
+                subset["growth_metric"] = subset["sales_yoy"].fillna(0.0)
+                subset["profit_metric"] = (
+                    subset["net_income"] / (subset["sales"] + eps)
+                ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    for c in ["size_metric", "growth_metric", "profit_metric"]:
-        m = subset[c].mean()
-        s = subset[c].std(ddof=0) or eps
-        subset[c + "_z"] = (subset[c] - m) / s
+                for c in ["size_metric", "growth_metric", "profit_metric"]:
+                    m = subset[c].mean()
+                    s = subset[c].std(ddof=0) or eps
+                    subset[c + "_z"] = (subset[c] - m) / s
 
-    focus = subset[subset["company"] == sel_comp].copy()
-    focus_row = focus.iloc[0]
+                focus = subset[subset["company"] == sel_comp].copy()
+                focus_row = focus.iloc[0]
 
-    f_vec = np.array(
-        [
-            float(focus_row["size_metric_z"]),
-            float(focus_row["growth_metric_z"]),
-            float(focus_row["profit_metric_z"]),
-        ]
-    )
+                f_vec = np.array(
+                    [
+                        float(focus_row["size_metric_z"]),
+                        float(focus_row["growth_metric_z"]),
+                        float(focus_row["profit_metric_z"]),
+                    ]
+                )
 
                 subset["peer_dist"] = subset.apply(
                     lambda r: np.linalg.norm(
@@ -514,8 +514,7 @@ else:
                 peer = subset.nsmallest(k, "peer_dist").copy()
 
                 st.caption(
-                    "※ 같은 연도·산업 내에서 **자산 규모, 매출 성장률, 이익률**이 비슷한 회사를 "
-                    "동종 그룹으로 구성했습니다."
+                    "※ 같은 연도·산업 내에서 자산 규모, 매출 성장률, 이익률이 비슷한 회사를 동종 그룹으로 구성했습니다."
                 )
 
                 metrics = [
@@ -541,7 +540,8 @@ else:
                     z_cols = [str(m) + "_z_peer" for m in metrics]
                     z_vals = peer_z[z_cols].values
                     labels = [
-                        f"{r['company']}_{int(r['year'])}" for _, r in peer.iterrows()
+                        f"{r['company']}_{int(r['year'])}"
+                        for _, r in peer.iterrows()
                     ]
 
                     fig, ax = plt.subplots(
@@ -559,8 +559,7 @@ else:
                     st.pyplot(fig)
 
                     st.caption(
-                        "색이 **붉을수록 동종 평균보다 높고**, **푸를수록 낮습니다.** "
-                        "예: 매출채권/재고/TATA가 붉게 튀는 기업은 해당 지표가 또래 대비 과도할 수 있습니다."
+                        "색이 붉을수록 동종 평균보다 높고, 푸를수록 낮습니다."
                     )
 
 with tab3:
