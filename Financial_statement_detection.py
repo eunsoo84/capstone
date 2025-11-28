@@ -1,4 +1,5 @@
 import io
+import os
 
 import matplotlib.pyplot as plt
 from matplotlib import font_manager, rcParams
@@ -8,9 +9,10 @@ import streamlit as st
 from sklearn.ensemble import IsolationForest
 
 font_path = "NotoSansKR-Regular.ttf"
-font_manager.fontManager.addfont(font_path)
-rcParams["font.family"] = "Noto Sans KR"
-rcParams["axes.unicode_minus"] = False
+if os.path.exists(font_path):
+    font_manager.fontManager.addfont(font_path)
+    rcParams["font.family"] = "Noto Sans KR"
+    rcParams["axes.unicode_minus"] = False
 
 st.set_page_config(
     page_title="회계 이상 탐지 대시보드 · 강화판",
