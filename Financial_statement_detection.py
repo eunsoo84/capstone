@@ -19,8 +19,6 @@ def reset_session_for_new_file(filename: str):
 
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
-
-    
     df = df.copy()
 
     aliases = {
@@ -44,14 +42,22 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns=col_map)
 
-    required = ["company", "year", "sales", "ar", "inventory", "total_assets", "ocf", "net_income"]
+    required = [
+        "company",
+        "year",
+        "sales",
+        "ar",
+        "inventory",
+        "total_assets",
+        "ocf",
+        "net_income",
+    ]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
             f"필수 컬럼이 누락되었습니다: {missing}. "
             f"현재 컬럼: {list(df.columns)}"
         )
-
 
     if "industry" not in df.columns:
         df["industry"] = "미지정"
@@ -60,8 +66,6 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _compute_benford_for_dataset(df: pd.DataFrame) -> dict:
-
-
     vals = df["sales"].astype(float).abs()
     vals = vals[vals > 0]
 
@@ -99,16 +103,14 @@ def _compute_benford_for_dataset(df: pd.DataFrame) -> dict:
         }
 
     counts = pd.value_counts(first_digits).reindex(range(1, 10), fill_value=0)
-    obs = (counts / counts.sum()).values  # 실제 비율
+    obs = (counts / counts.sum()).values
 
     digits = np.arange(1, 10)
-    exp = np.log10(1 + 1 / digits)  # Benford 이론 비율
+    exp = np.log10(1 + 1 / digits)
 
     mad = float(np.mean(np.abs(obs - exp)))
-
     span = float(vals.max() / max(vals.min(), 1e-9))
 
-    
     applicable = True
     reason = "기본 표본/범위 기준을 충족합니다."
     if n < 100:
@@ -137,30 +139,24 @@ def run_pipeline(
     w_iso: float = 1.0,
     w_benford: float = 1.0,
 ):
-    
     df = _ensure_columns(df_raw)
-
 
     df = df.reset_index(drop=True)
     df["row_id"] = df.index + 1
 
-
     df["year"] = pd.to_numeric(df["year"], errors="coerce")
 
     eps = 1e-9
-
 
     df["ar_to_sales"] = df["ar"] / (df["sales"] + eps)
     df["inv_to_sales"] = df["inventory"] / (df["sales"] + eps)
     df["ocf_to_ni"] = df["ocf"] / (df["net_income"] + eps)
     df["tata"] = (df["net_income"] - df["ocf"]) / (df["total_assets"] + eps)
 
-
     df = df.sort_values(["company", "year"])
     df["sales_yoy"] = (
         df.groupby("company")["sales"].pct_change().fillna(0.0) * 100.0
     )
-
 
     metrics = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
 
@@ -183,7 +179,7 @@ def run_pipeline(
             df.groupby(["year", "industry"], group_keys=False)
             .apply(zscore_group, cols=metrics)
         )
-    else:  # "all"
+    else:
         df = zscore_group(df, metrics)
 
     z_ar = df.get("ar_to_sales_z", pd.Series(0, index=df.index))
@@ -192,7 +188,6 @@ def run_pipeline(
     z_ocf = df.get("ocf_to_ni_z", pd.Series(0, index=df.index))
 
     df["mscore_raw"] = z_ar + z_inv + z_tata - z_ocf
-
 
     iso_features = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
     X = df[iso_features].fillna(0.0).values
@@ -203,15 +198,13 @@ def run_pipeline(
             random_state=42,
         )
         iso.fit(X)
-        iso_raw = -iso.decision_function(X)  # 값이 클수록 이상치
+        iso_raw = -iso.decision_function(X)
         iso_raw = np.array(iso_raw)
         iso_norm = (iso_raw - iso_raw.min()) / (iso_raw.max() - iso_raw.min() + eps)
     except Exception:
-
         iso_norm = np.zeros(df.shape[0])
 
     df["iso_score"] = iso_norm
-
 
     benford_info = _compute_benford_for_dataset(df)
     benford_applicable = benford_info["applicable"]
@@ -222,17 +215,17 @@ def run_pipeline(
         "mad": benford_info["mad"],
     }
 
-
     if benford_info["mad"] is not None:
         df["benford_mad"] = float(benford_info["mad"])
     else:
         df["benford_mad"] = np.nan
 
-    
     m = df["mscore_raw"].fillna(0.0).values
     m_norm = (m - m.min()) / (m.max() - m.min() + eps)
 
-    ben_used = bool(benford_applicable and w_benford > 0 and benford_info["mad"] is not None)
+    ben_used = bool(
+        benford_applicable and w_benford > 0 and benford_info["mad"] is not None
+    )
     if ben_used:
         b = df["benford_mad"].fillna(0.0).values
         b_norm = (b - b.min()) / (b.max() - b.min() + eps)
@@ -247,7 +240,6 @@ def run_pipeline(
 
     df["flag_score"] = flag_score
 
-
     df_scored = df.sort_values("flag_score", ascending=False).reset_index(drop=True)
     df_scored["rank"] = np.arange(1, len(df_scored) + 1)
 
@@ -261,8 +253,6 @@ def run_pipeline(
     }
 
     return df_scored, meta
-
-
 
 
 st.sidebar.header("옵션")
@@ -324,7 +314,8 @@ w_benford = st.sidebar.slider(
 
 st.sidebar.markdown("---")
 st.sidebar.info(
-    "📎 필수 항목: 회사명, 결산연도, 매출액, 매출원가, 판매관리비, 영업이익, 감가상각비, 매출채권, 재고자산, 자산총계, 부채총계, 영업활동현금흐름, 당기순이익, 업종(권장)"
+    "📎 필수 항목: 회사명, 결산연도, 매출액, 매출원가, 판매관리비, 영업이익, 감가상각비, "
+    "매출채권, 재고자산, 자산총계, 부채총계, 영업활동현금흐름, 당기순이익, 업종(권장)"
 )
 
 st.title("회계 이상 탐지 대시보드 · 강화판")
@@ -332,7 +323,7 @@ st.title("회계 이상 탐지 대시보드 · 강화판")
 st.markdown(
     """
 1. 아래에 CSV/엑셀 파일을 업로드하세요.  
-2. 필수 항목이 입력되어야 합니다.  
+2. 필수 항목이 들어있어야 합니다.  
 3. 왼쪽에서 **탐지 민감도(의심 비율)**와 **가중치**를 조정하며 Top-N 변화를 확인합니다.  
 4. 하단 탭에서  
    - 🔍 **Top-N 의심 리스트 & 일관 의심 기업**,  
@@ -481,7 +472,6 @@ with tab2:
                     subset["net_income"] / (subset["sales"] + eps)
                 ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-                # z-score
                 for c in ["size_metric", "growth_metric", "profit_metric"]:
                     m = subset[c].mean()
                     s = subset[c].std(ddof=0) or eps
@@ -537,11 +527,12 @@ with tab2:
                 else:
                     peer_z = peer.copy()
                     for m in metrics:
-                        mm = peer[m].mean()
-                        ss = peer[m].std(ddof=0) or 1e-9
-                        peer_z[m + "_z_peer"] = (peer[m] - mm) / ss
+                        col_name = str(m)
+                        mm = peer[col_name].mean()
+                        ss = peer[col_name].std(ddof=0) or 1e-9
+                        peer_z[col_name + "_z_peer"] = (peer[col_name] - mm) / ss
 
-                    z_cols = [m + "_z_peer" for m in metrics]
+                    z_cols = [str(m) + "_z_peer" for m in metrics]
                     z_vals = peer_z[z_cols].values
                     labels = [
                         f"{r['company']}_{int(r['year'])}" for _, r in peer.iterrows()
@@ -581,7 +572,7 @@ with tab3:
         )
     else:
         st.warning(
-            "⚠️ 본 데이터 집합은 Benford 법칙을 적용하기에 적절하지 않을 수 있습니다.\n\n"
+            "⚠️ 해당 데이터는 Benford 법칙을 적용하기에 적절하지 않을 수 있습니다.\n\n"
             f"사유: {reason}"
         )
 
@@ -610,7 +601,7 @@ with tab3:
                 "표본 수가 적거나 금액 범위가 좁으면 신뢰도가 떨어질 수 있습니다."
             )
         else:
-            st.info("Benford 분포를 그릴 수 있는 정보가 부족합니다.")
+            st.info("Benford 분포를 그릴 수 있는 데이터가 부족합니다.")
 
     st.markdown("---")
     st.markdown(
