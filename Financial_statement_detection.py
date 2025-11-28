@@ -24,7 +24,7 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     aliases = {
         "company": ["company", "회사명", "법인명"],
         "year": ["year", "결산연도", "연도"],
-        "industry": ["industry", "업종"],
+        "industry": ["industry", "업종","산업"],
         "sales": ["sales", "매출액", "수익"],
         "ar": ["ar", "accounts_receivable", "매출채권"],
         "inventory": ["inventory", "재고자산"],
