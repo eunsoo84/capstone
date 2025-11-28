@@ -140,10 +140,13 @@ def run_pipeline(
     w_benford: float = 1.0,
 ):
     df = _ensure_columns(df_raw)
-        
-    for col in ["sales", "ar", "inventory", "total_assets", "ocf", "net_income"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    for col in ["sales", "ar", "inventory", "total_assets", "ocf", "net_income"]:
+        s = df[col].astype(str)
+        s = s.str.replace(",", "", regex=False)
+        s = s.str.replace(" ", "", regex=False)
+        s = s.str.replace("\u00a0", "", regex=False)
+        df[col] = pd.to_numeric(s, errors="coerce")
 
     df = df.reset_index(drop=True)
     df["row_id"] = df.index + 1
@@ -156,6 +159,7 @@ def run_pipeline(
     df["inv_to_sales"] = df["inventory"] / (df["sales"] + eps)
     df["ocf_to_ni"] = df["ocf"] / (df["net_income"] + eps)
     df["tata"] = (df["net_income"] - df["ocf"]) / (df["total_assets"] + eps)
+
 
     df = df.sort_values(["company", "year"])
     df["sales_yoy"] = (
