@@ -464,30 +464,32 @@ with tab2:
             sel_comp = st.selectbox("기준 회사 선택", companies, key="peer_comp")
 
             focus = subset[subset["company"] == sel_comp].copy()
-            if focus.empty:
-                st.warning("선택한 회사 데이터가 없습니다.")
-            else:
-                focus_row = focus.iloc[0]
+if focus.empty:
+    st.warning("선택한 회사 데이터가 없습니다.")
+else:
+    eps = 1e-9
+    subset["size_metric"] = np.log1p(subset["total_assets"])
+    subset["growth_metric"] = subset["sales_yoy"].fillna(0.0)
+    subset["profit_metric"] = (
+        subset["net_income"] / (subset["sales"] + eps)
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-                eps = 1e-9
-                subset["size_metric"] = np.log1p(subset["total_assets"])
-                subset["growth_metric"] = subset["sales_yoy"].fillna(0.0)
-                subset["profit_metric"] = (
-                    subset["net_income"] / (subset["sales"] + eps)
-                ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    for c in ["size_metric", "growth_metric", "profit_metric"]:
+        m = subset[c].mean()
+        s = subset[c].std(ddof=0) or eps
+        subset[c + "_z"] = (subset[c] - m) / s
 
-                for c in ["size_metric", "growth_metric", "profit_metric"]:
-                    m = subset[c].mean()
-                    s = subset[c].std(ddof=0) or eps
-                    subset[c + "_z"] = (subset[c] - m) / s
+    focus = subset[subset["company"] == sel_comp].copy()
+    focus_row = focus.iloc[0]
 
-                f_vec = np.array(
-                    [
-                        float(focus_row["size_metric_z"]),
-                        float(focus_row["growth_metric_z"]),
-                        float(focus_row["profit_metric_z"]),
-                    ]
-                )
+    f_vec = np.array(
+        [
+            float(focus_row["size_metric_z"]),
+            float(focus_row["growth_metric_z"]),
+            float(focus_row["profit_metric_z"]),
+        ]
+    )
+
                 subset["peer_dist"] = subset.apply(
                     lambda r: np.linalg.norm(
                         np.array(
