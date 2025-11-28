@@ -613,7 +613,7 @@ with tab3:
             title_text = f"선두 자릿수 분포 비교 (MAD={mad_val:.4f}, {mad_level})"
             st.markdown(f"#### {title_text}")
 
-            ax.set_title(f"MAD={mad_val:.4f}, {mad_level}")
+            ax.set_title(f"MAD={mad_val:.4f}")
             ax.legend()
             st.pyplot(fig)
 
