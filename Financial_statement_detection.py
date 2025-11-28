@@ -1,10 +1,16 @@
 import io
 
 import matplotlib.pyplot as plt
+from matplotlib import font_manager, rcParams
 import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.ensemble import IsolationForest
+
+font_path = "NotoSansKR-Regular.ttf"
+font_manager.fontManager.addfont(font_path)
+rcParams["font.family"] = "Noto Sans KR"
+rcParams["axes.unicode_minus"] = False
 
 st.set_page_config(
     page_title="회계 이상 탐지 대시보드 · 강화판",
@@ -613,7 +619,8 @@ with tab3:
             title_text = f"선두 자릿수 분포 비교 (MAD={mad_val:.4f}, {mad_level})"
             st.markdown(f"#### {title_text}")
 
-            ax.set_title(f"MAD={mad_val:.4f}")
+            ax.set_title(f"선두 자릿수 분포 (MAD={mad_val:.4f})")
+
             ax.legend()
             st.pyplot(fig)
 
