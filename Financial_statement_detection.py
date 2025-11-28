@@ -610,9 +610,13 @@ with tab3:
             ax.set_xticks(digits)
             ax.set_xlabel("선두 자릿수")
             ax.set_ylabel("비율")
-            ax.set_title(f"선두 자릿수 분포 비교 (MAD={mad_val:.4f}, {mad_level})")
+            title_text = f"선두 자릿수 분포 비교 (MAD={mad_val:.4f}, {mad_level})"
+            st.markdown(f"#### {title_text}")
+
+            ax.set_title(f"MAD={mad_val:.4f}, {mad_level}")
             ax.legend()
             st.pyplot(fig)
+
 
             st.caption(
                 "그래프는 전체 매출 데이터를 한 번에 모아, 선두 숫자 분포가 "
