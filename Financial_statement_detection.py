@@ -217,22 +217,24 @@ def run_pipeline(
     df["score_iso_part"] = w_iso * df["iso_score"]
     df["flag_score"] = df["score_linear_part"] + df["score_iso_part"]
 
+    z_mat = np.column_stack([z[m].values for m in metrics])
+    abs_mat = np.abs(z_mat)
+    idx = np.argsort(-abs_mat, axis=1)
+
+    names = np.array(metrics, dtype=object)
+    r = np.arange(len(df))
+
+    df["_top1_metric"] = names[idx[:, 0]]
+    df["_top1_z"] = z_mat[r, idx[:, 0]]
+
+    df["_top2_metric"] = names[idx[:, 1]]
+    df["_top2_z"] = z_mat[r, idx[:, 1]]
+
+    df["_top3_metric"] = names[idx[:, 2]]
+    df["_top3_z"] = z_mat[r, idx[:, 2]]
+
     df_scored = df.sort_values("flag_score", ascending=False).reset_index(drop=True)
     df_scored["rank"] = np.arange(1, len(df_scored) + 1)
-
-    contrib = pd.DataFrame({m: z[m].values for m in metrics})
-    df_scored["_top1_metric"] = contrib.abs().idxmax(axis=1)
-    df_scored["_top1_z"] = contrib.lookup(contrib.index, df_scored["_top1_metric"])
-    contrib2 = contrib.copy()
-    for i in range(len(df_scored)):
-        contrib2.loc[i, df_scored.loc[i, "_top1_metric"]] = 0.0
-    df_scored["_top2_metric"] = contrib2.abs().idxmax(axis=1)
-    df_scored["_top2_z"] = contrib2.lookup(contrib2.index, df_scored["_top2_metric"])
-    contrib3 = contrib2.copy()
-    for i in range(len(df_scored)):
-        contrib3.loc[i, df_scored.loc[i, "_top2_metric"]] = 0.0
-    df_scored["_top3_metric"] = contrib3.abs().idxmax(axis=1)
-    df_scored["_top3_z"] = contrib3.lookup(contrib3.index, df_scored["_top3_metric"])
 
     return df_scored
 
@@ -271,7 +273,7 @@ allowed_k = st.sidebar.slider("허용 후보 수(K) (0이면 0건 가능)", 0, 3
 top_n = st.sidebar.slider("표시 Top-N", 1, 30, 10, 1)
 
 st.sidebar.markdown("---")
-p_cut = st.sidebar.slider("Beneish/ISO 퍼센타일 컷", 0.80, 0.99, 0.95, 0.01)
+p_cut = st.sidebar.slider("퍼센타일 컷(Linear/ISO)", 0.80, 0.99, 0.95, 0.01)
 
 st.sidebar.markdown("---")
 demo_only = st.sidebar.toggle("시연 회사만 보기", value=False)
