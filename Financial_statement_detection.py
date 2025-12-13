@@ -15,7 +15,7 @@ if os.path.exists(font_path):
     rcParams["font.family"] = "Noto Sans KR"
     rcParams["axes.unicode_minus"] = False
 
-st.set_page_config(page_title="회계 이상 탐지 대시보드 · (Benford 제외)", layout="wide")
+st.set_page_config(page_title="회계 이상 탐지 대시보드 · (0건 가능, Benford 제외)", layout="wide")
 
 EPS = 1e-9
 
@@ -231,6 +231,8 @@ min_score = st.sidebar.slider("절대 컷오프(flag_score)", 0.0, 2.0, 0.90, 0.
 min_beneish = st.sidebar.slider("Beneish 최소(mscore_norm)", 0.0, 1.0, 0.80, 0.05)
 min_iso = st.sidebar.slider("ISO 최소(iso_score)", 0.0, 1.0, 0.60, 0.05)
 
+rule = st.sidebar.radio("출력 규칙", ["OR(추천)", "AND(엄격)"])
+
 st.title("회계 이상 탐지 대시보드 · (0건 가능, Benford 제외)")
 
 uploaded = st.file_uploader("CSV 또는 Excel 업로드", type=["csv", "xlsx"])
@@ -250,11 +252,21 @@ except Exception as e:
     st.error(f"처리 중 오류: {e}")
     st.stop()
 
-df_view = df_scored[
-    (df_scored["flag_score"] >= min_score)
-    & (df_scored["mscore_norm"] >= min_beneish)
-    & (df_scored["iso_score"] >= min_iso)
-].copy()
+base = df_scored["flag_score"] >= min_score
+cond_b = df_scored["mscore_norm"] >= min_beneish
+cond_i = df_scored["iso_score"] >= min_iso
+
+if rule.startswith("OR"):
+    mask = base & (cond_b | cond_i)
+else:
+    mask = base & cond_b & cond_i
+
+df_view = df_scored[mask].copy()
+
+st.caption(
+    f"통과 개수: {df_view.shape[0]} / 전체 {df_scored.shape[0]}  |  "
+    f"flag_score≥{min_score:.2f} AND (Beneish≥{min_beneish:.2f} {'OR' if rule.startswith('OR') else 'AND'} ISO≥{min_iso:.2f})"
+)
 
 if df_view.empty:
     st.info("현재 기준에서는 ‘추가 점검 후보’가 없습니다.")
