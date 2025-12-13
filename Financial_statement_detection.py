@@ -36,9 +36,14 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "year": ["year", "결산연도", "연도"],
         "industry": ["industry", "업종", "산업"],
         "sales": ["sales", "매출액", "수익"],
+        "cogs": ["cogs", "매출원가", "원가"],
+        "sga": ["sga", "판매관리비", "판관비"],
+        "op_income": ["op_income", "영업이익", "영업손익"],
+        "dep": ["dep", "감가상각비", "감가상각"],
         "ar": ["ar", "accounts_receivable", "매출채권"],
         "inventory": ["inventory", "재고자산"],
         "total_assets": ["total_assets", "자산총계", "총자산"],
+        "total_liab": ["total_liab", "부채총계", "총부채"],
         "ocf": ["ocf", "영업활동현금흐름", "영업현금흐름"],
         "net_income": ["net_income", "당기순이익"],
     }
@@ -58,6 +63,17 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     if "industry" not in df.columns:
         df["industry"] = "미지정"
+
+    optional_defaults = {
+        "cogs": np.nan,
+        "sga": np.nan,
+        "op_income": np.nan,
+        "dep": np.nan,
+        "total_liab": np.nan,
+    }
+    for k, v in optional_defaults.items():
+        if k not in df.columns:
+            df[k] = v
 
     return df
 
@@ -89,7 +105,7 @@ def _pct_rank(x: pd.Series) -> pd.Series:
 class PipelineParams:
     group_mode: str
     contamination: float
-    w_beneish: float
+    w_linear: float
     w_iso: float
 
 
@@ -99,7 +115,7 @@ def run_pipeline_cached(df_raw: pd.DataFrame, params: PipelineParams):
         df_raw=df_raw,
         group_mode=params.group_mode,
         contamination=params.contamination,
-        w_beneish=params.w_beneish,
+        w_linear=params.w_linear,
         w_iso=params.w_iso,
     )
 
@@ -108,12 +124,17 @@ def run_pipeline(
     df_raw: pd.DataFrame,
     group_mode: str = "year_industry",
     contamination: float = 0.10,
-    w_beneish: float = 1.0,
+    w_linear: float = 1.0,
     w_iso: float = 1.0,
 ):
     df = _ensure_columns(df_raw)
 
-    for col in ["sales", "ar", "inventory", "total_assets", "ocf", "net_income"]:
+    num_cols = [
+        "sales", "cogs", "sga", "op_income", "dep",
+        "ar", "inventory", "total_assets", "total_liab",
+        "ocf", "net_income",
+    ]
+    for col in num_cols:
         df[col] = _parse_number_series(df[col])
 
     df = df.reset_index(drop=True)
@@ -125,10 +146,29 @@ def run_pipeline(
     df["ocf_to_ni"] = _safe_ratio(df["ocf"], df["net_income"])
     df["tata"] = _safe_ratio(df["net_income"] - df["ocf"], df["total_assets"] + EPS)
 
+    df["cogs_to_sales"] = _safe_ratio(df["cogs"], df["sales"] + EPS)
+    df["sga_to_sales"] = _safe_ratio(df["sga"], df["sales"] + EPS)
+    df["opm"] = _safe_ratio(df["op_income"], df["sales"] + EPS)
+    df["dep_to_assets"] = _safe_ratio(df["dep"], df["total_assets"] + EPS)
+    df["liab_to_assets"] = _safe_ratio(df["total_liab"], df["total_assets"] + EPS)
+
     df = df.sort_values(["company", "year"])
     df["sales_yoy"] = df.groupby("company")["sales"].pct_change().fillna(0.0) * 100.0
 
-    metrics = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
+    metrics = [
+        "ar_to_sales",
+        "inv_to_sales",
+        "tata",
+        "ocf_to_ni",
+        "cogs_to_sales",
+        "sga_to_sales",
+        "opm",
+        "dep_to_assets",
+        "liab_to_assets",
+    ]
+
+    for c in metrics:
+        df[c] = df[c].replace([np.inf, -np.inf], np.nan)
 
     if group_mode == "year":
         df = df.groupby("year", group_keys=False).apply(_zscore_group, cols=metrics)
@@ -137,25 +177,28 @@ def run_pipeline(
     else:
         df = _zscore_group(df, metrics)
 
-    for c in ["ar_to_sales_z", "inv_to_sales_z", "tata_z", "ocf_to_ni_z"]:
+    z_cols = [m + "_z" for m in metrics]
+    for c in z_cols:
         if c in df.columns:
             df[c] = df[c].clip(-5, 5)
 
-    z_ar = df.get("ar_to_sales_z", pd.Series(0, index=df.index))
-    z_inv = df.get("inv_to_sales_z", pd.Series(0, index=df.index))
-    z_tata = df.get("tata_z", pd.Series(0, index=df.index))
-    z_ocf = df.get("ocf_to_ni_z", pd.Series(0, index=df.index))
+    z = {m: df.get(m + "_z", pd.Series(0, index=df.index)).fillna(0.0) for m in metrics}
 
-    df["mscore_raw"] = z_ar + z_inv + z_tata - z_ocf
+    df["linear_raw"] = (
+        z["ar_to_sales"]
+        + z["inv_to_sales"]
+        + z["tata"]
+        - z["ocf_to_ni"]
+        + z["cogs_to_sales"]
+        + z["sga_to_sales"]
+        - z["opm"]
+        + z["dep_to_assets"]
+        + z["liab_to_assets"]
+    )
 
-    df["c_ar"] = z_ar
-    df["c_inv"] = z_inv
-    df["c_tata"] = z_tata
-    df["c_ocfneg"] = -z_ocf
+    df["linear_norm"] = _pct_rank(df["linear_raw"].fillna(df["linear_raw"].median()))
 
-    df["mscore_norm"] = _pct_rank(df["mscore_raw"].fillna(df["mscore_raw"].median()))
-
-    iso_features = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
+    iso_features = metrics
     X = df[iso_features].fillna(0.0).values
 
     try:
@@ -170,34 +213,45 @@ def run_pipeline(
         df["iso_raw"] = 0.0
         df["iso_score"] = 0.0
 
-    df["score_beneish_part"] = w_beneish * df["mscore_norm"]
+    df["score_linear_part"] = w_linear * df["linear_norm"]
     df["score_iso_part"] = w_iso * df["iso_score"]
-    df["flag_score"] = df["score_beneish_part"] + df["score_iso_part"]
+    df["flag_score"] = df["score_linear_part"] + df["score_iso_part"]
 
     df_scored = df.sort_values("flag_score", ascending=False).reset_index(drop=True)
     df_scored["rank"] = np.arange(1, len(df_scored) + 1)
+
+    contrib = pd.DataFrame({m: z[m].values for m in metrics})
+    df_scored["_top1_metric"] = contrib.abs().idxmax(axis=1)
+    df_scored["_top1_z"] = contrib.lookup(contrib.index, df_scored["_top1_metric"])
+    contrib2 = contrib.copy()
+    for i in range(len(df_scored)):
+        contrib2.loc[i, df_scored.loc[i, "_top1_metric"]] = 0.0
+    df_scored["_top2_metric"] = contrib2.abs().idxmax(axis=1)
+    df_scored["_top2_z"] = contrib2.lookup(contrib2.index, df_scored["_top2_metric"])
+    contrib3 = contrib2.copy()
+    for i in range(len(df_scored)):
+        contrib3.loc[i, df_scored.loc[i, "_top2_metric"]] = 0.0
+    df_scored["_top3_metric"] = contrib3.abs().idxmax(axis=1)
+    df_scored["_top3_z"] = contrib3.lookup(contrib3.index, df_scored["_top3_metric"])
+
     return df_scored
 
 
 def explain_row(row: pd.Series) -> str:
     parts = {
-        "Beneish(간이)": float(row.get("score_beneish_part", 0.0)),
+        "Linear(지표합)": float(row.get("score_linear_part", 0.0)),
         "IsolationForest": float(row.get("score_iso_part", 0.0)),
     }
     driver = max(parts, key=parts.get)
 
-    sub = {
-        "AR/Sales": float(row.get("c_ar", 0.0)),
-        "Inv/Sales": float(row.get("c_inv", 0.0)),
-        "TATA": float(row.get("c_tata", 0.0)),
-        "OCF/NI(낮음)": float(row.get("c_ocfneg", 0.0)),
-    }
-    top2 = sorted(sub.items(), key=lambda x: x[1], reverse=True)[:2]
+    t1m, t1z = str(row.get("_top1_metric", "")), float(row.get("_top1_z", 0.0))
+    t2m, t2z = str(row.get("_top2_metric", "")), float(row.get("_top2_z", 0.0))
+    t3m, t3z = str(row.get("_top3_metric", "")), float(row.get("_top3_z", 0.0))
 
     return (
         f"- 주도 요인: {driver}\n"
-        f"- 점수: Beneish {parts['Beneish(간이)']:.3f} + ISO {parts['IsolationForest']:.3f} = {float(row.get('flag_score', 0.0)):.3f}\n"
-        f"- Beneish 기여(Top2): " + ", ".join([f"{k}({v:+.2f})" for k, v in top2])
+        f"- 점수: Linear {parts['Linear(지표합)']:.3f} + ISO {parts['IsolationForest']:.3f} = {float(row.get('flag_score', 0.0)):.3f}\n"
+        f"- 동종 대비 편차 Top3: {t1m}({t1z:+.2f}), {t2m}({t2z:+.2f}), {t3m}({t3z:+.2f})"
     )
 
 
@@ -208,21 +262,19 @@ group_mode_key = {"연도": "year", "연도+산업": "year_industry", "전체": 
 
 contamination = st.sidebar.slider("ISO 민감도(contamination)", 0.01, 0.30, 0.10, 0.01)
 
-w_beneish = st.sidebar.slider("Beneish 비중", 0.0, 3.0, 1.0, 0.1)
+w_linear = st.sidebar.slider("지표합(Linear) 비중", 0.0, 3.0, 1.0, 0.1)
 w_iso = st.sidebar.slider("ISO 비중", 0.0, 3.0, 1.0, 0.1)
 
 st.sidebar.markdown("---")
 rule = st.sidebar.radio("출력 규칙", ["OR(추천)", "AND(엄격)"])
-
 allowed_k = st.sidebar.slider("허용 후보 수(K) (0이면 0건 가능)", 0, 30, 0, 1)
 top_n = st.sidebar.slider("표시 Top-N", 1, 30, 10, 1)
 
 st.sidebar.markdown("---")
-manual = st.sidebar.toggle("수동 임계값 사용", value=False)
-if manual:
-    thr_score = st.sidebar.slider("flag_score 최소", 0.0, 6.0, 2.50, 0.05)
-    thr_b = st.sidebar.slider("Beneish(백분위) 최소", 0.0, 1.0, 0.98, 0.01)
-    thr_i = st.sidebar.slider("ISO(백분위) 최소", 0.0, 1.0, 0.98, 0.01)
+p_cut = st.sidebar.slider("Beneish/ISO 퍼센타일 컷", 0.80, 0.99, 0.95, 0.01)
+
+st.sidebar.markdown("---")
+demo_only = st.sidebar.toggle("시연 회사만 보기", value=False)
 
 st.title("회계 이상 스크리닝")
 
@@ -232,7 +284,7 @@ if uploaded is None:
 
 df_raw = pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv") else pd.read_excel(uploaded)
 
-params = PipelineParams(group_mode=group_mode_key, contamination=contamination, w_beneish=w_beneish, w_iso=w_iso)
+params = PipelineParams(group_mode=group_mode_key, contamination=contamination, w_linear=w_linear, w_iso=w_iso)
 
 try:
     df_scored = run_pipeline_cached(df_raw, params)
@@ -240,29 +292,35 @@ except Exception as e:
     st.error(f"처리 중 오류: {e}")
     st.stop()
 
-if not manual:
-    if allowed_k == 0:
-        thr_score = float(df_scored["flag_score"].max()) + 1e-9
-    else:
-        thr_score = float(df_scored["flag_score"].nlargest(int(allowed_k)).min())
+if allowed_k == 0:
+    thr_score = float(df_scored["flag_score"].max()) + 1e-9
+else:
+    thr_score = float(df_scored["flag_score"].nlargest(int(allowed_k)).min())
 
-    thr_b = float(df_scored["mscore_norm"].quantile(0.95))
-    thr_i = float(df_scored["iso_score"].quantile(0.95))
+thr_lin = float(df_scored["linear_norm"].quantile(p_cut))
+thr_i = float(df_scored["iso_score"].quantile(p_cut))
 
 base = df_scored["flag_score"] >= thr_score
-cond_b = df_scored["mscore_norm"] >= thr_b
+cond_l = df_scored["linear_norm"] >= thr_lin
 cond_i = df_scored["iso_score"] >= thr_i
 
 if rule.startswith("OR"):
-    mask = base & (cond_b | cond_i)
+    mask = base & (cond_l | cond_i)
 else:
-    mask = base & cond_b & cond_i
+    mask = base & cond_l & cond_i
 
 df_view = df_scored[mask].copy()
 
+if demo_only:
+    all_companies = sorted(df_scored["company"].astype(str).unique().tolist())
+    default_demo = [c for c in ["이마트", "대웅제약", "KG이니시스", "기아"] if c in all_companies]
+    demo_companies = st.multiselect("시연 회사 선택(표시만 제한)", all_companies, default=default_demo)
+    if demo_companies:
+        df_view = df_view[df_view["company"].astype(str).isin(demo_companies)].copy()
+
 st.caption(
     f"통과: {df_view.shape[0]} / {df_scored.shape[0]} | "
-    f"컷오프: flag_score≥{thr_score:.4f}, Beneish≥p95({thr_b:.2f}), ISO≥p95({thr_i:.2f}) | 규칙={rule.split('(')[0]} | K={allowed_k}"
+    f"컷오프: flag_score≥{thr_score:.4f}, Linear≥p{int(p_cut*100)}({thr_lin:.2f}), ISO≥p{int(p_cut*100)}({thr_i:.2f}) | 규칙={rule.split('(')[0]} | K={allowed_k}"
 )
 
 tab1, tab2 = st.tabs(["🔍 후보 리스트 & Top3 이유", "🌡️ 동종 그룹 열지도"])
@@ -270,38 +328,71 @@ tab1, tab2 = st.tabs(["🔍 후보 리스트 & Top3 이유", "🌡️ 동종 그
 with tab1:
     if df_view.empty:
         st.info("현재 기준에서는 추가 점검 후보가 없습니다.")
-        st.stop()
+    else:
+        df_top = df_view.head(top_n).copy()
 
-    df_top = df_view.head(top_n).copy()
+        show_cols = [
+            "rank",
+            "company",
+            "year",
+            "industry",
+            "flag_score",
+            "score_linear_part",
+            "score_iso_part",
+            "linear_raw",
+            "linear_norm",
+            "iso_score",
+            "ar_to_sales",
+            "inv_to_sales",
+            "tata",
+            "ocf_to_ni",
+            "cogs_to_sales",
+            "sga_to_sales",
+            "opm",
+            "dep_to_assets",
+            "liab_to_assets",
+        ]
+        show_cols = [c for c in show_cols if c in df_top.columns]
+        st.dataframe(df_top[show_cols], use_container_width=True, height=380)
 
-    show_cols = [
-        "rank",
-        "company",
-        "year",
-        "industry",
-        "flag_score",
-        "score_beneish_part",
-        "score_iso_part",
-        "mscore_raw",
-        "mscore_norm",
-        "iso_score",
-        "ar_to_sales",
-        "inv_to_sales",
-        "tata",
-        "ocf_to_ni",
-    ]
-    show_cols = [c for c in show_cols if c in df_top.columns]
-    st.dataframe(df_top[show_cols], use_container_width=True, height=380)
+        top_k = min(3, len(df_top))
+        for i in range(top_k):
+            r = df_top.iloc[i]
+            with st.expander(f"#{int(r['rank'])} {r['company']} ({int(r['year'])})", expanded=(i == 0)):
+                st.markdown(explain_row(r))
+                comp_df = pd.DataFrame(
+                    {"component": ["Linear(지표합)", "IsolationForest"], "score_part": [r["score_linear_part"], r["score_iso_part"]]}
+                ).set_index("component")
+                st.bar_chart(comp_df)
 
-    top_k = min(3, len(df_top))
-    for i in range(top_k):
-        r = df_top.iloc[i]
-        with st.expander(f"#{int(r['rank'])} {r['company']} ({int(r['year'])})", expanded=(i == 0)):
-            st.markdown(explain_row(r))
-            comp_df = pd.DataFrame(
-                {"component": ["Beneish(간이)", "IsolationForest"], "score_part": [r["score_beneish_part"], r["score_iso_part"]]}
-            ).set_index("component")
-            st.bar_chart(comp_df)
+    st.markdown("---")
+    st.subheader("회사/연도 조회(통과 여부 무관)")
+
+    q_company = st.text_input("회사명(부분검색)", value="이마트")
+    q_year = st.text_input("연도(선택)", value="2024")
+
+    hit = df_scored[df_scored["company"].astype(str).str.contains(q_company, case=False, na=False)].copy()
+    if q_year.strip():
+        hit = hit[hit["year"].astype(str) == q_year.strip()].copy()
+
+    if hit.empty:
+        st.info("검색 결과가 없습니다.")
+    else:
+        hit = hit.sort_values("rank").head(30).copy()
+        hit["gap_flag_score"] = hit["flag_score"] - thr_score
+        hit["gap_linear"] = hit["linear_norm"] - thr_lin
+        hit["gap_iso"] = hit["iso_score"] - thr_i
+
+        cols2 = [
+            "rank","company","year","industry",
+            "flag_score","linear_norm","iso_score",
+            "gap_flag_score","gap_linear","gap_iso",
+            "ar_to_sales","inv_to_sales","tata","ocf_to_ni",
+            "cogs_to_sales","sga_to_sales","opm","dep_to_assets","liab_to_assets",
+            "_top1_metric","_top1_z","_top2_metric","_top2_z","_top3_metric","_top3_z"
+        ]
+        cols2 = [c for c in cols2 if c in hit.columns]
+        st.dataframe(hit[cols2], use_container_width=True, height=280)
 
 with tab2:
     years = sorted(df_scored["year"].dropna().unique())
@@ -345,29 +436,43 @@ with tab2:
     )
 
     k = st.slider("동종 그룹 크기", 3, min(10, subset.shape[0]), min(5, subset.shape[0]))
+
     peer = subset.nsmallest(k, "peer_dist").copy()
 
-    metrics = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni", "mscore_raw", "iso_score", "flag_score"]
-    metrics = [m for m in metrics if m in peer.columns]
+    metrics_hm = [
+        "ar_to_sales",
+        "inv_to_sales",
+        "tata",
+        "ocf_to_ni",
+        "cogs_to_sales",
+        "sga_to_sales",
+        "opm",
+        "dep_to_assets",
+        "liab_to_assets",
+        "linear_raw",
+        "iso_score",
+        "flag_score",
+    ]
+    metrics_hm = [m for m in metrics_hm if m in peer.columns]
 
-    if not metrics:
+    if not metrics_hm:
         st.info("열지도로 보여줄 지표가 없습니다.")
         st.stop()
 
     peer_z = peer.copy()
-    for m in metrics:
+    for m in metrics_hm:
         mm = peer[m].mean()
         ss = peer[m].std(ddof=0) or EPS
         peer_z[m + "_z_peer"] = (peer[m] - mm) / ss
 
-    z_cols = [m + "_z_peer" for m in metrics]
+    z_cols = [m + "_z_peer" for m in metrics_hm]
     z_vals = peer_z[z_cols].values
     labels = [f"{r['company']}_{int(r['year'])}" for _, r in peer.iterrows()]
 
-    fig, ax = plt.subplots(figsize=(1.2 * len(metrics), 0.55 * len(peer) + 1))
+    fig, ax = plt.subplots(figsize=(1.2 * len(metrics_hm), 0.55 * len(peer) + 1))
     im = ax.imshow(z_vals, aspect="auto", cmap="coolwarm")
-    ax.set_xticks(np.arange(len(metrics)))
-    ax.set_xticklabels(metrics, rotation=45, ha="right")
+    ax.set_xticks(np.arange(len(metrics_hm)))
+    ax.set_xticklabels(metrics_hm, rotation=45, ha="right")
     ax.set_yticks(np.arange(len(labels)))
     ax.set_yticklabels(labels)
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
