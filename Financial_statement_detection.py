@@ -201,10 +201,10 @@ def explain_top_row(row: pd.Series) -> dict:
     driver = max(parts, key=parts.get)
 
     beneish_sub = {
-        "AR/Sales 과다": float(row.get("beneish_c_ar", 0.0)),
-        "Inv/Sales 과다": float(row.get("beneish_c_inv", 0.0)),
-        "TATA(발생액) 과다": float(row.get("beneish_c_tata", 0.0)),
-        "OCF/NI 낮음": float(row.get("beneish_c_ocfneg", 0.0)),
+        "AR/Sales": float(row.get("beneish_c_ar", 0.0)),
+        "Inv/Sales": float(row.get("beneish_c_inv", 0.0)),
+        "TATA": float(row.get("beneish_c_tata", 0.0)),
+        "OCF/NI(낮음)": float(row.get("beneish_c_ocfneg", 0.0)),
     }
     top_beneish = sorted(beneish_sub.items(), key=lambda x: x[1], reverse=True)[:2]
 
@@ -222,14 +222,16 @@ group_mode_ui = st.sidebar.radio("그룹 표준화 기준", ["연도", "연도+�
 group_mode_key = {"연도": "year", "연도+산업": "year_industry", "전체": "all"}[group_mode_ui]
 
 contamination = st.sidebar.slider("탐지 민감도(ISO contamination)", 0.01, 0.30, 0.10, 0.01)
-top_n = st.sidebar.slider("Top-N(의심 후보 수)", 3, 30, 10, 1)
+top_n = st.sidebar.slider("Top-N(최대 표시 개수)", 1, 30, 10, 1)
 
 w_beneish = st.sidebar.slider("Beneish(간이) 비중", 0.0, 3.0, 1.0, 0.1)
 w_iso = st.sidebar.slider("Isolation Forest 비중", 0.0, 3.0, 1.0, 0.1)
 
-min_pct = st.sidebar.slider("정상 제외 기준(상위 백분위 이상만 표시)", 0.50, 0.99, 0.80, 0.01)
+min_score = st.sidebar.slider("절대 컷오프(flag_score)", 0.0, 2.0, 0.90, 0.05)
+min_beneish = st.sidebar.slider("Beneish 최소(mscore_norm)", 0.0, 1.0, 0.80, 0.05)
+min_iso = st.sidebar.slider("ISO 최소(iso_score)", 0.0, 1.0, 0.60, 0.05)
 
-st.title("회계 이상 탐지 대시보드 · 강화판 (Benford 제외)")
+st.title("회계 이상 탐지 대시보드 · (0건 가능, Benford 제외)")
 
 uploaded = st.file_uploader("CSV 또는 Excel 업로드", type=["csv", "xlsx"])
 if uploaded is None:
@@ -248,10 +250,15 @@ except Exception as e:
     st.error(f"처리 중 오류: {e}")
     st.stop()
 
-cut = float(df_scored["flag_score"].quantile(min_pct))
-df_view = df_scored[df_scored["flag_score"] >= cut].copy()
+df_view = df_scored[
+    (df_scored["flag_score"] >= min_score)
+    & (df_scored["mscore_norm"] >= min_beneish)
+    & (df_scored["iso_score"] >= min_iso)
+].copy()
+
 if df_view.empty:
-    df_view = df_scored.copy()
+    st.info("현재 기준에서는 ‘추가 점검 후보’가 없습니다.")
+    st.stop()
 
 df_top = df_view.head(top_n).copy()
 
@@ -278,35 +285,34 @@ with tab1:
     st.dataframe(df_top[show_cols], use_container_width=True, height=360)
 
     top_k = min(3, len(df_top))
-    if top_k > 0:
-        for i in range(top_k):
-            r = df_top.iloc[i]
-            exp = explain_top_row(r)
-            title = f"#{int(r['rank'])} {r['company']} ({int(r['year'])})"
-            with st.expander(title, expanded=(i == 0)):
-                st.markdown(exp["msg"])
-                p = exp["parts"]
-                comp_df = pd.DataFrame({"component": list(p.keys()), "score_part": list(p.values())}).set_index("component")
-                st.bar_chart(comp_df)
+    for i in range(top_k):
+        r = df_top.iloc[i]
+        exp = explain_top_row(r)
+        title = f"#{int(r['rank'])} {r['company']} ({int(r['year'])})"
+        with st.expander(title, expanded=(i == 0)):
+            st.markdown(exp["msg"])
+            p = exp["parts"]
+            comp_df = pd.DataFrame({"component": list(p.keys()), "score_part": list(p.values())}).set_index("component")
+            st.bar_chart(comp_df)
 
-                snap_cols = ["flag_score", "mscore_raw", "iso_score", "ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
-                snap_cols = [c for c in snap_cols if c in df_top.columns]
-                st.dataframe(pd.DataFrame([r[snap_cols]]), use_container_width=True)
+            snap_cols = ["flag_score", "mscore_raw", "iso_score", "ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
+            snap_cols = [c for c in snap_cols if c in df_top.columns]
+            st.dataframe(pd.DataFrame([r[snap_cols]]), use_container_width=True)
 
-                g = df_scored[(df_scored["year"] == r["year"]) & (df_scored["industry"] == r["industry"])].copy()
-                if len(g) >= 5:
-                    cols = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni", "mscore_raw", "iso_score"]
-                    cols = [c for c in cols if c in g.columns]
-                    pct = {}
-                    for c in cols:
-                        pct_series = _percentile_rank(g[c].fillna(g[c].median()))
-                        idx = g.index[g["row_id"] == r["row_id"]]
-                        if len(idx) > 0:
-                            pct[c] = float(pct_series.loc[idx[0]])
-                    if pct:
-                        pct_df = pd.DataFrame([pct]).T.reset_index()
-                        pct_df.columns = ["metric", "percentile_in_peer(%)"]
-                        st.dataframe(pct_df, use_container_width=True, height=240)
+            g = df_scored[(df_scored["year"] == r["year"]) & (df_scored["industry"] == r["industry"])].copy()
+            if len(g) >= 5:
+                cols = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni", "mscore_raw", "iso_score"]
+                cols = [c for c in cols if c in g.columns]
+                pct = {}
+                for c in cols:
+                    pct_series = _percentile_rank(g[c].fillna(g[c].median()))
+                    idx = g.index[g["row_id"] == r["row_id"]]
+                    if len(idx) > 0:
+                        pct[c] = float(pct_series.loc[idx[0]])
+                if pct:
+                    pct_df = pd.DataFrame([pct]).T.reset_index()
+                    pct_df.columns = ["metric", "percentile_in_peer(%)"]
+                    st.dataframe(pct_df, use_container_width=True, height=240)
 
 with tab2:
     years = sorted(df_scored["year"].dropna().unique())
@@ -349,7 +355,7 @@ with tab2:
         axis=1,
     )
 
-    k = st.slider("동종 그룹 크기 (기준 회사 포함)", 3, min(10, subset.shape[0]), min(5, subset.shape[0]))
+    k = st.slider("동종 그룹 크기", 3, min(10, subset.shape[0]), min(5, subset.shape[0]))
     peer = subset.nsmallest(k, "peer_dist").copy()
 
     metrics = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni", "mscore_raw", "iso_score", "flag_score"]
