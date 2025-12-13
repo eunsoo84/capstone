@@ -85,15 +85,25 @@ def _safe_ratio(num: pd.Series, den: pd.Series) -> pd.Series:
     return num / den2
 
 
-def _zscore_group(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+def _clip_series(s: pd.Series, lo: float, hi: float) -> pd.Series:
+    return s.clip(lower=lo, upper=hi)
+
+
+def _robust_z(x: pd.Series) -> pd.Series:
+    x = x.astype(float)
+    med = x.median()
+    mad = (x - med).abs().median()
+    denom = 1.4826 * mad
+    if denom is None or denom == 0 or np.isnan(denom):
+        return pd.Series(0.0, index=x.index)
+    return (x - med) / denom
+
+
+def _robust_z_group(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     g = df.copy()
     for c in cols:
-        m = g[c].mean()
-        s = g[c].std(ddof=0)
-        if s is None or s == 0 or np.isnan(s):
-            g[c + "_z"] = 0.0
-        else:
-            g[c + "_z"] = (g[c] - m) / s
+        g[c + "_rz"] = _robust_z(g[c].replace([np.inf, -np.inf], np.nan).fillna(0.0))
+        g[c + "_rz"] = g[c + "_rz"].clip(-6, 6)
     return g
 
 
@@ -101,35 +111,40 @@ def _pct_rank(x: pd.Series) -> pd.Series:
     return x.rank(pct=True)
 
 
-@dataclass
-class PipelineParams:
-    group_mode: str
-    contamination: float
-    w_linear: float
-    w_iso: float
-    w_delta: float
+def _pretty_metric(name: str) -> str:
+    mapping = {
+        "ar_to_sales": "AR/Sales",
+        "inv_to_sales": "Inv/Sales",
+        "tata": "TATA",
+        "ocf_to_ni": "OCF/NI",
+        "cogs_to_sales": "COGS/Sales",
+        "sga_to_sales": "SGA/Sales",
+        "opm": "OPM",
+        "dep_to_assets": "Dep/Assets",
+        "liab_to_assets": "Liab/Assets",
+        "ar_to_sales_delta": "Δ AR/Sales",
+        "inv_to_sales_delta": "Δ Inv/Sales",
+        "tata_delta": "Δ TATA",
+        "ocf_to_ni_delta": "Δ OCF/NI",
+        "cogs_to_sales_delta": "Δ COGS/Sales",
+        "sga_to_sales_delta": "Δ SGA/Sales",
+        "opm_delta": "Δ OPM",
+        "dep_to_assets_delta": "Δ Dep/Assets",
+        "liab_to_assets_delta": "Δ Liab/Assets",
+        "chg_ar_to_sales": "Δ(원본대비) AR/Sales",
+        "chg_inv_to_sales": "Δ(원본대비) Inv/Sales",
+        "chg_tata": "Δ(원본대비) TATA",
+        "chg_ocf_to_ni": "Δ(원본대비) OCF/NI",
+        "chg_cogs_to_sales": "Δ(원본대비) COGS/Sales",
+        "chg_sga_to_sales": "Δ(원본대비) SGA/Sales",
+        "chg_opm": "Δ(원본대비) OPM",
+        "chg_dep_to_assets": "Δ(원본대비) Dep/Assets",
+        "chg_liab_to_assets": "Δ(원본대비) Liab/Assets",
+    }
+    return mapping.get(name, name)
 
 
-@st.cache_data(show_spinner=False)
-def run_pipeline_cached(df_raw: pd.DataFrame, params: PipelineParams):
-    return run_pipeline(
-        df_raw=df_raw,
-        group_mode=params.group_mode,
-        contamination=params.contamination,
-        w_linear=params.w_linear,
-        w_iso=params.w_iso,
-        w_delta=params.w_delta,
-    )
-
-
-def run_pipeline(
-    df_raw: pd.DataFrame,
-    group_mode: str = "year_industry",
-    contamination: float = 0.10,
-    w_linear: float = 1.0,
-    w_iso: float = 1.0,
-    w_delta: float = 1.0,
-):
+def _compute_features(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     df = _ensure_columns(df_raw)
 
     num_cols = [
@@ -157,69 +172,83 @@ def run_pipeline(
     df["dep_to_assets"] = _safe_ratio(df["dep"], df["total_assets"] + EPS)
     df["liab_to_assets"] = _safe_ratio(df["total_liab"], df["total_assets"] + EPS)
 
-    df["sales_yoy"] = df.groupby("company")["sales"].pct_change().fillna(0.0) * 100.0
+    df["ar_to_sales"] = _clip_series(df["ar_to_sales"], -5, 5)
+    df["inv_to_sales"] = _clip_series(df["inv_to_sales"], -5, 5)
+    df["ocf_to_ni"] = _clip_series(df["ocf_to_ni"], -10, 10)
+    df["tata"] = _clip_series(df["tata"], -5, 5)
+
+    df["cogs_to_sales"] = _clip_series(df["cogs_to_sales"], -5, 5)
+    df["sga_to_sales"] = _clip_series(df["sga_to_sales"], -5, 5)
+    df["opm"] = _clip_series(df["opm"], -5, 5)
+    df["dep_to_assets"] = _clip_series(df["dep_to_assets"], -5, 5)
+    df["liab_to_assets"] = _clip_series(df["liab_to_assets"], -5, 5)
 
     level_metrics = [
         "ar_to_sales",
         "inv_to_sales",
         "tata",
         "ocf_to_ni",
-        "cogs_to_sales",
-        "sga_to_sales",
-        "opm",
-        "dep_to_assets",
-        "liab_to_assets",
     ]
 
-    for c in level_metrics:
-        df[c] = df[c].replace([np.inf, -np.inf], np.nan)
+    opt = ["cogs_to_sales", "sga_to_sales", "opm", "dep_to_assets", "liab_to_assets"]
+    for c in opt:
+        if df[c].notna().sum() > 0:
+            level_metrics.append(c)
 
     for m in level_metrics:
         df[m + "_delta"] = df.groupby("company")[m].diff().fillna(0.0)
-        df[m + "_delta"] = df[m + "_delta"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        df[m + "_delta"] = _clip_series(df[m + "_delta"], -5, 5)
 
-    delta_metrics = [m + "_delta" for m in level_metrics]
+    metrics = level_metrics + [m + "_delta" for m in level_metrics]
 
-    if group_mode == "year":
-        df = df.groupby("year", group_keys=False).apply(_zscore_group, cols=level_metrics + delta_metrics)
-    elif group_mode == "year_industry":
-        df = df.groupby(["year", "industry"], group_keys=False).apply(_zscore_group, cols=level_metrics + delta_metrics)
+    return df, metrics
+
+
+@dataclass
+class PipelineParams:
+    group_mode: str
+    contamination: float
+    w_linear: float
+    w_iso: float
+    w_delta: float
+
+
+@st.cache_data(show_spinner=False)
+def run_single_cached(df_raw: pd.DataFrame, params: PipelineParams):
+    return run_single(df_raw, params)
+
+
+def run_single(df_raw: pd.DataFrame, params: PipelineParams) -> pd.DataFrame:
+    df, metrics = _compute_features(df_raw)
+
+    if params.group_mode == "year":
+        df = df.groupby("year", group_keys=False).apply(_robust_z_group, cols=metrics)
+    elif params.group_mode == "year_industry":
+        df = df.groupby(["year", "industry"], group_keys=False).apply(_robust_z_group, cols=metrics)
     else:
-        df = _zscore_group(df, level_metrics + delta_metrics)
+        df = _robust_z_group(df, cols=metrics)
 
-    z_cols = [m + "_z" for m in (level_metrics + delta_metrics)]
-    for c in z_cols:
-        if c in df.columns:
-            df[c] = df[c].clip(-5, 5)
+    rz_cols = [m + "_rz" for m in metrics]
 
-    z = {m: df.get(m + "_z", pd.Series(0, index=df.index)).fillna(0.0) for m in (level_metrics + delta_metrics)}
+    base_m = [m for m in metrics if not m.endswith("_delta")]
+    delta_m = [m for m in metrics if m.endswith("_delta")]
 
-    base_linear = (
-        z["ar_to_sales"]
-        + z["inv_to_sales"]
-        + z["tata"]
-        - z["ocf_to_ni"]
-        + z["cogs_to_sales"]
-        + z["sga_to_sales"]
-        - z["opm"]
-        + z["dep_to_assets"]
-        + z["liab_to_assets"]
-    )
+    base_score = np.zeros(len(df), dtype=float)
+    for m in base_m:
+        base_score += np.abs(df[m + "_rz"].values)
 
-    delta_linear = np.zeros(len(df), dtype=float)
-    for m in delta_metrics:
-        delta_linear += np.abs(z[m].values)
+    delta_score = np.zeros(len(df), dtype=float)
+    for m in delta_m:
+        delta_score += np.abs(df[m + "_rz"].values)
 
-    df["linear_raw"] = (w_linear * base_linear.values) + (w_delta * delta_linear)
-    df["linear_norm"] = _pct_rank(df["linear_raw"].fillna(df["linear_raw"].median()))
+    df["linear_raw"] = (params.w_linear * base_score) + (params.w_delta * delta_score)
+    df["linear_norm"] = _pct_rank(df["linear_raw"])
 
-    iso_features = level_metrics + delta_metrics
-    X = df[iso_features].fillna(0.0).values
-
+    X = df[metrics].fillna(0.0).values
     try:
         scaler = RobustScaler()
         Xs = scaler.fit_transform(X)
-        iso = IsolationForest(contamination=contamination, random_state=42)
+        iso = IsolationForest(contamination=params.contamination, random_state=42)
         iso.fit(Xs)
         iso_raw = -iso.decision_function(Xs)
         df["iso_raw"] = iso_raw
@@ -230,88 +259,134 @@ def run_pipeline(
 
     df["score_linear_part"] = df["linear_norm"]
     df["score_iso_part"] = df["iso_score"]
-    df["flag_score"] = (w_linear * df["linear_norm"]) + (w_iso * df["iso_score"])
+    df["flag_score"] = (params.w_linear * df["linear_norm"]) + (params.w_iso * df["iso_score"])
 
-    all_metrics_for_reason = level_metrics + delta_metrics
-    z_mat = np.column_stack([z[m].values for m in all_metrics_for_reason])
-    abs_mat = np.abs(z_mat)
+    rz_mat = np.column_stack([df[c].values for c in rz_cols])
+    abs_mat = np.abs(rz_mat)
     idx = np.argsort(-abs_mat, axis=1)
 
-    names = np.array(all_metrics_for_reason, dtype=object)
+    names = np.array(metrics, dtype=object)
     r = np.arange(len(df))
 
     df["_top1_metric"] = names[idx[:, 0]]
-    df["_top1_z"] = z_mat[r, idx[:, 0]]
+    df["_top1_z"] = rz_mat[r, idx[:, 0]]
     df["_top2_metric"] = names[idx[:, 1]]
-    df["_top2_z"] = z_mat[r, idx[:, 1]]
+    df["_top2_z"] = rz_mat[r, idx[:, 1]]
     df["_top3_metric"] = names[idx[:, 2]]
-    df["_top3_z"] = z_mat[r, idx[:, 2]]
+    df["_top3_z"] = rz_mat[r, idx[:, 2]]
 
     df_scored = df.sort_values("flag_score", ascending=False).reset_index(drop=True)
     df_scored["rank"] = np.arange(1, len(df_scored) + 1)
-
     return df_scored
 
 
-def _pretty_metric(name: str) -> str:
-    mapping = {
-        "ar_to_sales": "AR/Sales",
-        "inv_to_sales": "Inv/Sales",
-        "tata": "TATA",
-        "ocf_to_ni": "OCF/NI",
-        "cogs_to_sales": "COGS/Sales",
-        "sga_to_sales": "SGA/Sales",
-        "opm": "OPM(영업이익률)",
-        "dep_to_assets": "Dep/Assets",
-        "liab_to_assets": "Liab/Assets",
-        "ar_to_sales_delta": "Δ AR/Sales",
-        "inv_to_sales_delta": "Δ Inv/Sales",
-        "tata_delta": "Δ TATA",
-        "ocf_to_ni_delta": "Δ OCF/NI",
-        "cogs_to_sales_delta": "Δ COGS/Sales",
-        "sga_to_sales_delta": "Δ SGA/Sales",
-        "opm_delta": "Δ OPM",
-        "dep_to_assets_delta": "Δ Dep/Assets",
-        "liab_to_assets_delta": "Δ Liab/Assets",
-    }
-    return mapping.get(name, name)
+@st.cache_data(show_spinner=False)
+def run_compare_cached(df_base_raw: pd.DataFrame, df_test_raw: pd.DataFrame, params: PipelineParams):
+    return run_compare(df_base_raw, df_test_raw, params)
+
+
+def run_compare(df_base_raw: pd.DataFrame, df_test_raw: pd.DataFrame, params: PipelineParams) -> pd.DataFrame:
+    base, base_metrics = _compute_features(df_base_raw)
+    test, test_metrics = _compute_features(df_test_raw)
+
+    metrics = [m for m in base_metrics if m in test_metrics]
+    key = ["company", "year", "industry"]
+
+    b = base[key + metrics].copy()
+    t = test[key + metrics + ["row_id"]].copy()
+
+    mdf = pd.merge(
+        t,
+        b,
+        on=key,
+        how="left",
+        suffixes=("_test", "_base"),
+    )
+
+    for m in metrics:
+        mdf["chg_" + m] = (mdf[m + "_test"] - mdf[m + "_base"]).abs().fillna(0.0)
+
+    chg_metrics = ["chg_" + m for m in metrics]
+
+    if params.group_mode == "year":
+        mdf = mdf.groupby("year", group_keys=False).apply(_robust_z_group, cols=chg_metrics)
+    elif params.group_mode == "year_industry":
+        mdf = mdf.groupby(["year", "industry"], group_keys=False).apply(_robust_z_group, cols=chg_metrics)
+    else:
+        mdf = _robust_z_group(mdf, cols=chg_metrics)
+
+    rz_cols = [m + "_rz" for m in chg_metrics]
+    score = np.zeros(len(mdf), dtype=float)
+    for m in chg_metrics:
+        score += np.abs(mdf[m + "_rz"].values)
+
+    mdf["linear_raw"] = score
+    mdf["linear_norm"] = _pct_rank(mdf["linear_raw"])
+    mdf["iso_score"] = 0.0
+    mdf["score_linear_part"] = mdf["linear_norm"]
+    mdf["score_iso_part"] = 0.0
+    mdf["flag_score"] = mdf["linear_norm"]
+
+    rz_mat = np.column_stack([mdf[c].values for c in rz_cols])
+    abs_mat = np.abs(rz_mat)
+    idx = np.argsort(-abs_mat, axis=1)
+
+    names = np.array(chg_metrics, dtype=object)
+    r = np.arange(len(mdf))
+
+    mdf["_top1_metric"] = names[idx[:, 0]]
+    mdf["_top1_z"] = rz_mat[r, idx[:, 0]]
+    mdf["_top2_metric"] = names[idx[:, 1]]
+    mdf["_top2_z"] = rz_mat[r, idx[:, 1]]
+    mdf["_top3_metric"] = names[idx[:, 2]]
+    mdf["_top3_z"] = rz_mat[r, idx[:, 2]]
+
+    df_scored = mdf.sort_values("flag_score", ascending=False).reset_index(drop=True)
+    df_scored["rank"] = np.arange(1, len(df_scored) + 1)
+    return df_scored
 
 
 def explain_row(row: pd.Series) -> str:
     t1m, t1z = _pretty_metric(str(row.get("_top1_metric", ""))), float(row.get("_top1_z", 0.0))
     t2m, t2z = _pretty_metric(str(row.get("_top2_metric", ""))), float(row.get("_top2_z", 0.0))
     t3m, t3z = _pretty_metric(str(row.get("_top3_metric", ""))), float(row.get("_top3_z", 0.0))
-
     return (
-        f"- 점수: Linear {float(row.get('score_linear_part', 0.0)):.3f} / ISO {float(row.get('score_iso_part', 0.0)):.3f} / 합 {float(row.get('flag_score', 0.0)):.3f}\n"
-        f"- 동종 대비 편차 Top3: {t1m}({t1z:+.2f}), {t2m}({t2z:+.2f}), {t3m}({t3z:+.2f})"
+        f"- 점수: {float(row.get('flag_score', 0.0)):.3f}\n"
+        f"- Top3 이유: {t1m}({t1z:+.2f}), {t2m}({t2z:+.2f}), {t3m}({t3z:+.2f})"
     )
 
 
 st.sidebar.header("설정")
-
 group_mode_ui = st.sidebar.radio("그룹 표준화 기준", ["연도", "연도+산업", "전체"])
 group_mode_key = {"연도": "year", "연도+산업": "year_industry", "전체": "all"}[group_mode_ui]
 
-contamination = st.sidebar.slider("ISO 민감도(contamination)", 0.01, 0.30, 0.10, 0.01)
-
+contamination = st.sidebar.slider("ISO 민감도", 0.01, 0.30, 0.10, 0.01)
 w_linear = st.sidebar.slider("Linear 비중", 0.0, 3.0, 1.0, 0.1)
 w_iso = st.sidebar.slider("ISO 비중", 0.0, 3.0, 1.0, 0.1)
 w_delta = st.sidebar.slider("전년 대비 변화(Δ) 반영", 0.0, 3.0, 1.0, 0.1)
 
 st.sidebar.markdown("---")
 rule = st.sidebar.radio("출력 규칙", ["OR(추천)", "AND(엄격)"])
-allowed_k = st.sidebar.slider("허용 후보 수(K) (0이면 0건 가능)", 0, 30, 0, 1)
-top_n = st.sidebar.slider("표시 Top-N", 1, 30, 10, 1)
-p_cut = st.sidebar.slider("퍼센타일 컷(Linear/ISO)", 0.80, 0.99, 0.95, 0.01)
+k_limit = st.sidebar.slider("후보 상한(K) (0이면 제한 없음)", 0, 200, 0, 1)
+top_n = st.sidebar.slider("표시 Top-N", 1, 200, 10, 1)
+p_cut_lin = st.sidebar.slider("Linear 컷(퍼센타일)", 0.70, 0.99, 0.95, 0.01)
+p_cut_iso = st.sidebar.slider("ISO 컷(퍼센타일)", 0.70, 0.99, 0.95, 0.01)
+
+st.sidebar.markdown("---")
+target_year = st.sidebar.selectbox("대상 연도 필터(선택)", ["(전체)"], index=0)
 
 st.title("회계 이상 스크리닝")
 
-uploaded = st.file_uploader("CSV 또는 Excel 업로드", type=["csv", "xlsx"])
-if uploaded is None:
+base_file = st.file_uploader("원본(정상) 파일(선택)", type=["csv", "xlsx"], key="base")
+test_file = st.file_uploader("검사 대상(변경/시연) 파일", type=["csv", "xlsx"], key="test")
+
+if test_file is None:
     st.stop()
 
-df_raw = pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv") else pd.read_excel(uploaded)
+def _read_file(u):
+    return pd.read_csv(u) if u.name.lower().endswith(".csv") else pd.read_excel(u)
+
+df_test_raw = _read_file(test_file)
 
 params = PipelineParams(
     group_mode=group_mode_key,
@@ -321,86 +396,75 @@ params = PipelineParams(
     w_delta=w_delta,
 )
 
-try:
-    df_scored = run_pipeline_cached(df_raw, params)
-except Exception as e:
-    st.error(f"처리 중 오류: {e}")
+compare_mode = base_file is not None
+if compare_mode:
+    df_base_raw = _read_file(base_file)
+    df_scored = run_compare_cached(df_base_raw, df_test_raw, params)
+else:
+    df_scored = run_single_cached(df_test_raw, params)
+
+df_scored = df_scored.copy()
+
+years_all = sorted(pd.to_numeric(df_scored["year"], errors="coerce").dropna().unique().tolist())
+target_year = st.sidebar.selectbox("대상 연도 필터(선택)", ["(전체)"] + [str(int(y)) for y in years_all])
+
+if target_year != "(전체)":
+    df_scored = df_scored[df_scored["year"].astype(str) == target_year].copy()
+    df_scored = df_scored.reset_index(drop=True)
+    df_scored["rank"] = np.arange(1, len(df_scored) + 1)
+
+if df_scored.empty:
+    st.info("필터 결과가 없습니다.")
     st.stop()
 
-if allowed_k == 0:
-    thr_score = float(df_scored["flag_score"].max()) + 1e-9
+if not compare_mode:
+    thr_lin = float(df_scored["linear_norm"].quantile(p_cut_lin))
+    thr_i = float(df_scored["iso_score"].quantile(p_cut_iso))
+    cond_l = df_scored["linear_norm"] >= thr_lin
+    cond_i = df_scored["iso_score"] >= thr_i
+    if rule.startswith("OR"):
+        mask = (cond_l | cond_i)
+    else:
+        mask = (cond_l & cond_i)
+    df_candidates = df_scored[mask].sort_values("flag_score", ascending=False).reset_index(drop=True)
 else:
-    thr_score = float(df_scored["flag_score"].nlargest(int(allowed_k)).min())
+    thr_lin = float(df_scored["flag_score"].quantile(p_cut_lin))
+    thr_i = 0.0
+    df_candidates = df_scored[df_scored["flag_score"] >= thr_lin].sort_values("flag_score", ascending=False).reset_index(drop=True)
 
-thr_lin = float(df_scored["linear_norm"].quantile(p_cut))
-thr_i = float(df_scored["iso_score"].quantile(p_cut))
-
-base = df_scored["flag_score"] >= thr_score
-cond_l = df_scored["linear_norm"] >= thr_lin
-cond_i = df_scored["iso_score"] >= thr_i
-
-if rule.startswith("OR"):
-    mask = base & (cond_l | cond_i)
+if k_limit > 0:
+    df_view = df_candidates.head(int(k_limit)).copy()
 else:
-    mask = base & cond_l & cond_i
-
-df_view = df_scored[mask].copy()
+    df_view = df_candidates.copy()
 
 st.caption(
-    f"통과: {df_view.shape[0]} / {df_scored.shape[0]} | "
-    f"컷오프: flag_score≥{thr_score:.4f}, Linear≥p{int(p_cut*100)}({thr_lin:.2f}), ISO≥p{int(p_cut*100)}({thr_i:.2f}) | 규칙={rule.split('(')[0]} | K={allowed_k}"
+    f"모드: {'비교(원본대비 변경 감지)' if compare_mode else '단일(비지도 이상치)'} | "
+    f"후보: {df_view.shape[0]} / {df_scored.shape[0]} | "
+    f"컷: Linear(p{int(p_cut_lin*100)}) | 규칙={rule.split('(')[0]} | K={'제한없음' if k_limit==0 else k_limit}"
 )
 
 tab1, tab2 = st.tabs(["🔍 후보 리스트 & Top3 이유", "🌡️ 동종 그룹 열지도"])
 
 with tab1:
     if df_view.empty:
-        st.info("현재 기준에서는 추가 점검 후보가 없습니다.")
+        st.info("현재 기준에서는 후보가 없습니다. (컷을 p90 정도로 낮추면 보통 바로 뜹니다.)")
     else:
-        df_top = df_view.head(top_n).copy()
-
+        df_top = df_view.head(int(top_n)).copy()
         show_cols = [
-            "rank",
-            "company",
-            "year",
-            "industry",
+            "rank", "company", "year", "industry",
             "flag_score",
-            "score_linear_part",
-            "score_iso_part",
-            "linear_raw",
-            "linear_norm",
+            "linear_raw", "linear_norm",
             "iso_score",
-            "ar_to_sales",
-            "inv_to_sales",
-            "tata",
-            "ocf_to_ni",
-            "cogs_to_sales",
-            "sga_to_sales",
-            "opm",
-            "dep_to_assets",
-            "liab_to_assets",
-            "ar_to_sales_delta",
-            "inv_to_sales_delta",
-            "tata_delta",
-            "ocf_to_ni_delta",
-            "cogs_to_sales_delta",
-            "sga_to_sales_delta",
-            "opm_delta",
-            "dep_to_assets_delta",
-            "liab_to_assets_delta",
+            "_top1_metric", "_top1_z", "_top2_metric", "_top2_z", "_top3_metric", "_top3_z",
         ]
         show_cols = [c for c in show_cols if c in df_top.columns]
-        st.dataframe(df_top[show_cols], use_container_width=True, height=380)
+        st.dataframe(df_top[show_cols], use_container_width=True, height=360)
 
         top_k = min(3, len(df_top))
         for i in range(top_k):
             r0 = df_top.iloc[i]
             with st.expander(f"#{int(r0['rank'])} {r0['company']} ({int(r0['year'])})", expanded=(i == 0)):
                 st.markdown(explain_row(r0))
-                comp_df = pd.DataFrame(
-                    {"component": ["Linear", "ISO"], "score_part": [r0["score_linear_part"], r0["score_iso_part"]]}
-                ).set_index("component")
-                st.bar_chart(comp_df)
 
     st.markdown("---")
     st.subheader("회사/연도 조회(통과 여부 무관)")
@@ -412,7 +476,7 @@ with tab1:
     sel_year2 = st.selectbox("연도 선택(선택)", ["(전체)"] + [str(int(y)) for y in years2])
 
     if len(sel_companies) == 0:
-        st.info("여기서는 회사 선택을 해야 조회가 됩니다.")
+        st.info("회사 선택을 해야 조회가 됩니다.")
     else:
         hit = df_scored[df_scored["company"].astype(str).isin(sel_companies)].copy()
         if sel_year2 != "(전체)":
@@ -422,14 +486,9 @@ with tab1:
             st.info("검색 결과가 없습니다.")
         else:
             hit = hit.sort_values("rank").copy()
-            hit["gap_flag_score"] = hit["flag_score"] - thr_score
-            hit["gap_linear"] = hit["linear_norm"] - thr_lin
-            hit["gap_iso"] = hit["iso_score"] - thr_i
-
             cols2 = [
                 "rank","company","year","industry",
                 "flag_score","linear_norm","iso_score",
-                "gap_flag_score","gap_linear","gap_iso",
                 "_top1_metric","_top1_z","_top2_metric","_top2_z","_top3_metric","_top3_z"
             ]
             cols2 = [c for c in cols2 if c in hit.columns]
@@ -453,80 +512,74 @@ with tab2:
             companies = subset["company"].unique().tolist()
             sel_comp = st.selectbox("기준 회사 선택", companies, key="peer_comp")
 
-            subset["size_metric"] = np.log1p(subset["total_assets"].fillna(0.0))
-            subset["growth_metric"] = subset["sales_yoy"].fillna(0.0)
-            subset["profit_metric"] = (subset["net_income"] / (subset["sales"] + EPS)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-            for c in ["size_metric", "growth_metric", "profit_metric"]:
-                m = subset[c].mean()
-                s = subset[c].std(ddof=0) or EPS
-                subset[c + "_z"] = (subset[c] - m) / s
-
-            focus = subset[subset["company"] == sel_comp].copy()
-            if focus.empty:
-                st.info("선택한 회사 데이터가 없습니다.")
+            if "total_assets" not in subset.columns or "sales_yoy" not in subset.columns:
+                st.info("동종 그룹 계산에 필요한 컬럼이 부족합니다.")
             else:
-                focus_row = focus.iloc[0]
-                f_vec = np.array([float(focus_row["size_metric_z"]), float(focus_row["growth_metric_z"]), float(focus_row["profit_metric_z"])])
+                subset["sales_yoy"] = pd.to_numeric(subset.get("sales_yoy", 0.0), errors="coerce").fillna(0.0)
+                subset["size_metric"] = np.log1p(pd.to_numeric(subset["total_assets"], errors="coerce").fillna(0.0))
+                subset["growth_metric"] = subset["sales_yoy"].fillna(0.0)
 
-                subset["peer_dist"] = subset.apply(
-                    lambda r1: np.linalg.norm(np.array([r1["size_metric_z"], r1["growth_metric_z"], r1["profit_metric_z"]]) - f_vec),
-                    axis=1,
-                )
+                sales = pd.to_numeric(subset.get("sales", 0.0), errors="coerce").fillna(0.0)
+                ni = pd.to_numeric(subset.get("net_income", 0.0), errors="coerce").fillna(0.0)
+                subset["profit_metric"] = (ni / (sales + EPS)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-                k_max = min(10, subset.shape[0])
-                k_default = min(5, subset.shape[0])
-                if k_max < 3:
-                    st.info("동종 그룹 크기를 설정할 수 없습니다.")
-                else:
-                    k = st.slider("동종 그룹 크기", 3, k_max, k_default)
-
-                    peer = subset.nsmallest(k, "peer_dist").copy()
-
-                    metrics_hm = [
-                        "ar_to_sales",
-                        "inv_to_sales",
-                        "tata",
-                        "ocf_to_ni",
-                        "cogs_to_sales",
-                        "sga_to_sales",
-                        "opm",
-                        "dep_to_assets",
-                        "liab_to_assets",
-                        "ar_to_sales_delta",
-                        "inv_to_sales_delta",
-                        "tata_delta",
-                        "ocf_to_ni_delta",
-                        "cogs_to_sales_delta",
-                        "sga_to_sales_delta",
-                        "opm_delta",
-                        "dep_to_assets_delta",
-                        "liab_to_assets_delta",
-                        "linear_raw",
-                        "iso_score",
-                        "flag_score",
-                    ]
-                    metrics_hm = [m for m in metrics_hm if m in peer.columns]
-
-                    if not metrics_hm:
-                        st.info("열지도로 보여줄 지표가 없습니다.")
+                for c in ["size_metric", "growth_metric", "profit_metric"]:
+                    med = subset[c].median()
+                    mad = (subset[c] - med).abs().median()
+                    denom = 1.4826 * mad
+                    if denom is None or denom == 0 or np.isnan(denom):
+                        subset[c + "_z"] = 0.0
                     else:
-                        peer_z = peer.copy()
-                        for m in metrics_hm:
-                            mm = peer[m].mean()
-                            ss = peer[m].std(ddof=0) or EPS
-                            peer_z[m + "_z_peer"] = (peer[m] - mm) / ss
+                        subset[c + "_z"] = ((subset[c] - med) / denom).clip(-6, 6)
 
-                        z_cols2 = [m + "_z_peer" for m in metrics_hm]
-                        z_vals = peer_z[z_cols2].values
-                        labels = [f"{r2['company']}_{int(r2['year'])}" for _, r2 in peer.iterrows()]
+                focus = subset[subset["company"] == sel_comp].copy()
+                if focus.empty:
+                    st.info("선택한 회사 데이터가 없습니다.")
+                else:
+                    fr = focus.iloc[0]
+                    f_vec = np.array([float(fr["size_metric_z"]), float(fr["growth_metric_z"]), float(fr["profit_metric_z"])])
 
-                        fig, ax = plt.subplots(figsize=(1.2 * len(metrics_hm), 0.55 * len(peer) + 1))
-                        im = ax.imshow(z_vals, aspect="auto", cmap="coolwarm")
-                        ax.set_xticks(np.arange(len(metrics_hm)))
-                        ax.set_xticklabels(metrics_hm, rotation=45, ha="right")
-                        ax.set_yticks(np.arange(len(labels)))
-                        ax.set_yticklabels(labels)
-                        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        ax.set_title("동종 그룹 내 지표 편차 (z-score)")
-                        st.pyplot(fig)
+                    subset["peer_dist"] = subset.apply(
+                        lambda r1: np.linalg.norm(np.array([r1["size_metric_z"], r1["growth_metric_z"], r1["profit_metric_z"]]) - f_vec),
+                        axis=1,
+                    )
+
+                    k_max = min(10, subset.shape[0])
+                    k_default = min(5, subset.shape[0])
+                    if k_max < 3:
+                        st.info("동종 그룹 크기를 설정할 수 없습니다.")
+                    else:
+                        k = st.slider("동종 그룹 크기", 3, k_max, k_default)
+                        peer = subset.nsmallest(k, "peer_dist").copy()
+
+                        cols_for_hm = []
+                        for c in ["flag_score", "linear_norm", "iso_score"]:
+                            if c in peer.columns:
+                                cols_for_hm.append(c)
+
+                        if not cols_for_hm:
+                            st.info("열지도로 보여줄 지표가 없습니다.")
+                        else:
+                            peer_z = peer.copy()
+                            for m in cols_for_hm:
+                                med = peer_z[m].median()
+                                mad = (peer_z[m] - med).abs().median()
+                                denom = 1.4826 * mad
+                                if denom is None or denom == 0 or np.isnan(denom):
+                                    peer_z[m + "_z_peer"] = 0.0
+                                else:
+                                    peer_z[m + "_z_peer"] = ((peer_z[m] - med) / denom).clip(-6, 6)
+
+                            z_cols2 = [m + "_z_peer" for m in cols_for_hm]
+                            z_vals = peer_z[z_cols2].values
+                            labels = [f"{r2['company']}_{int(r2['year'])}" for _, r2 in peer.iterrows()]
+
+                            fig, ax = plt.subplots(figsize=(1.2 * len(cols_for_hm), 0.55 * len(peer) + 1))
+                            im = ax.imshow(z_vals, aspect="auto", cmap="coolwarm")
+                            ax.set_xticks(np.arange(len(cols_for_hm)))
+                            ax.set_xticklabels(cols_for_hm, rotation=45, ha="right")
+                            ax.set_yticks(np.arange(len(labels)))
+                            ax.set_yticklabels(labels)
+                            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                            ax.set_title("동종 그룹 내 지표 편차 (Robust z)")
+                            st.pyplot(fig)
