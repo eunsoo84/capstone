@@ -151,9 +151,7 @@ def run_pipeline(
             g[col_name + "_z"] = _safe_zscore(g[col_name])
         return g
 
-    if group_mode == "year":
-        df = df.groupby("year", group_keys=False).apply(zscore_group, cols=metrics)
-    elif group_mode == "year_industry":
+    if group_mode == "year_industry":
         df = (
             df.groupby(["year", "industry"], group_keys=False)
             .apply(zscore_group, cols=metrics)
@@ -191,9 +189,7 @@ def run_pipeline(
 
     delta_cols = [m + "_d1" for m in metrics]
 
-    if group_mode == "year":
-        df = df.groupby("year", group_keys=False).apply(zscore_group, cols=delta_cols)
-    elif group_mode == "year_industry":
+    if group_mode == "year_industry":
         df = (
             df.groupby(["year", "industry"], group_keys=False)
             .apply(zscore_group, cols=delta_cols)
@@ -209,7 +205,6 @@ def run_pipeline(
 
     m = df["mscore_raw"].fillna(0.0).values
     m_norm = _norm01(m)
-
     df["mscore_norm"] = m_norm
 
     df["score_beneish_part"] = w_beneish * df["mscore_norm"].values
@@ -264,13 +259,10 @@ st.sidebar.header("옵션")
 
 group_mode = st.sidebar.radio(
     "그룹 표준화 기준",
-    ["연도", "연도+산업", "전체"],
-    help="연도/산업별로 지표를 표준화해 업종·규모 차이에서 오는 왜곡을 줄입니다.",
+    ["연도+산업", "전체"],
 )
 
-if group_mode == "연도":
-    group_mode_key = "year"
-elif group_mode == "연도+산업":
+if group_mode == "연도+산업":
     group_mode_key = "year_industry"
 else:
     group_mode_key = "all"
@@ -317,36 +309,17 @@ w_change = st.sidebar.slider(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**AND(엄격) 고정: 0건 가능 출력 규칙**")
+st.sidebar.markdown("**AND 고정 + 컷(p-quantile) 0.80 고정**")
 
-p_flag = st.sidebar.slider(
-    "최종 점수(flag_score) 퍼센타일 컷",
-    min_value=0.80,
-    max_value=0.99,
-    value=0.95,
-    step=0.01,
-)
-p_beneish = st.sidebar.slider(
-    "Beneish 퍼센타일 컷",
-    min_value=0.80,
-    max_value=0.99,
-    value=0.95,
-    step=0.01,
-)
-p_iso = st.sidebar.slider(
-    "ISO 퍼센타일 컷",
-    min_value=0.80,
-    max_value=0.99,
-    value=0.95,
-    step=0.01,
-)
-p_change = st.sidebar.slider(
-    "변화(Δ) 퍼센타일 컷",
-    min_value=0.80,
-    max_value=0.99,
-    value=0.95,
-    step=0.01,
-)
+p_flag = 0.80
+p_beneish = 0.80
+p_iso = 0.80
+p_change = 0.80
+
+st.sidebar.write(f"최종 점수(flag_score) 퍼센타일 컷: {p_flag:.2f}")
+st.sidebar.write(f"Beneish 퍼센타일 컷: {p_beneish:.2f}")
+st.sidebar.write(f"ISO 퍼센타일 컷: {p_iso:.2f}")
+st.sidebar.write(f"변화(Δ) 퍼센타일 컷: {p_change:.2f}")
 
 st.sidebar.markdown("---")
 st.sidebar.info(
@@ -358,8 +331,7 @@ st.title("부정회계 탐지 스크리닝")
 st.markdown(
     """
 1. CSV/엑셀 파일을 업로드하세요.  
-2. **정상 데이터에서 후보가 0건일 수도 있습니다(의도된 동작).**  
-3. 왼쪽에서 컷(퍼센타일)과 가중치를 조정하며 후보 변화를 확인합니다.  
+2. AND 고정 + 컷 0.80 고정으로 시연 안정성을 우선합니다.  
 """
 )
 
@@ -413,7 +385,7 @@ tab1, tab2, tab3 = st.tabs(
 )
 
 with tab1:
-    st.subheader("의심 후보 Top-N (0건 가능, AND 고정)")
+    st.subheader("의심 후보 Top-N (AND 고정, 컷 0.80 고정)")
 
     st.caption(
         f"컷 기준: flag≥p{int(p_flag*100)}({thr_flag:.4f}), "
