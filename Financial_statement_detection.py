@@ -330,8 +330,14 @@ st.title("부정회계 탐지 스크리닝")
 
 st.markdown(
     """
-1. CSV/엑셀 파일을 업로드하세요.  
-2. AND 고정 + 컷 0.80 고정으로 시연 안정성을 우선합니다.  
+1. 아래에 CSV/엑셀 파일을 업로드하세요.  
+2. 필수 항목이 들어있어야 합니다. (회사명, 결산연도, 매출액, 매출채권, 재고자산, 자산총계, 영업활동현금흐름, 당기순이익, 업종(권장))  
+3. 왼쪽에서 **탐지 민감도(ISO contamination)** 와 **가중치(Beneish/ISO/Δ)** 를 조정하며 결과 변화를 확인합니다.  
+
+4. 하단 탭에서   
+   - 🔍 **Top-N 의심 리스트 & Top 1~3 적발 사유**,   
+   - 🌡️ **동종 그룹 열지도(동종 업계끼리 비교)**,      
+   를 확인할 수 있습니다.
 """
 )
 
@@ -377,7 +383,12 @@ mask = (
     & (df_scored["change_score"] >= thr_c)
 )
 
-df_candidates = df_scored[mask].copy().sort_values("flag_score", ascending=False).reset_index(drop=True)
+df_candidates = (
+    df_scored[mask]
+    .copy()
+    .sort_values("flag_score", ascending=False)
+    .reset_index(drop=True)
+)
 df_candidates["rank"] = np.arange(1, len(df_candidates) + 1)
 
 tab1, tab2, tab3 = st.tabs(
@@ -562,7 +573,7 @@ with tab2:
                         st.caption("색이 붉을수록 동종 평균보다 높고, 푸를수록 낮습니다.")
 
 with tab3:
-    st.subheader("지표 뜻(발표 대비)")
+    st.subheader("지표 단어 의미")
 
     st.markdown(
         """
