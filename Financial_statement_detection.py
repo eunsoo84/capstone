@@ -309,17 +309,17 @@ w_change = st.sidebar.slider(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**AND 고정 + 컷(p-quantile) 0.80 고정**")
+st.sidebar.markdown("**AND 고정 + 상위 % 컷(기본 0.80) 고정**")
 
 p_flag = 0.80
 p_beneish = 0.80
 p_iso = 0.80
 p_change = 0.80
 
-st.sidebar.write(f"최종 점수(flag_score) 퍼센타일 컷: {p_flag:.2f}")
-st.sidebar.write(f"Beneish 퍼센타일 컷: {p_beneish:.2f}")
-st.sidebar.write(f"ISO 퍼센타일 컷: {p_iso:.2f}")
-st.sidebar.write(f"변화(Δ) 퍼센타일 컷: {p_change:.2f}")
+st.sidebar.write(f"최종 점수(flag_score) 상위 {(1 - p_flag) * 100:.0f}% 컷")
+st.sidebar.write(f"Beneish 상위 {(1 - p_beneish) * 100:.0f}% 컷")
+st.sidebar.write(f"ISO 상위 {(1 - p_iso) * 100:.0f}% 컷")
+st.sidebar.write(f"변화(Δ) 상위 {(1 - p_change) * 100:.0f}% 컷")
 
 st.sidebar.markdown("---")
 st.sidebar.info(
@@ -396,13 +396,11 @@ tab1, tab2, tab3 = st.tabs(
 )
 
 with tab1:
-    st.subheader("의심 후보 Top-N (AND 고정, 컷 0.80 고정)")
+    st.subheader("의심 후보 Top-N")
 
     st.caption(
-        f"컷 기준: flag≥p{int(p_flag*100)}({thr_flag:.4f}), "
-        f"Beneish≥p{int(p_beneish*100)}({thr_b:.4f}), "
-        f"ISO≥p{int(p_iso*100)}({thr_i:.4f}), "
-        f"Δ≥p{int(p_change*100)}({thr_c:.4f}) | 규칙=AND"
+        f"기준값: flag≥{thr_flag:.4f} / Beneish≥{thr_b:.4f} / ISO≥{thr_i:.4f} / Δ≥{thr_c:.4f} "
+        f"(모두 AND) | 상위 컷: flag {int((1-p_flag)*100)}%, Beneish {int((1-p_beneish)*100)}%, ISO {int((1-p_iso)*100)}%, Δ {int((1-p_change)*100)}%"
     )
 
     if df_candidates.empty:
@@ -573,7 +571,7 @@ with tab2:
                         st.caption("색이 붉을수록 동종 평균보다 높고, 푸를수록 낮습니다.")
 
 with tab3:
-    st.subheader("지표 단어 의미")
+    st.subheader("지표 뜻(발표 대비)")
 
     st.markdown(
         """
