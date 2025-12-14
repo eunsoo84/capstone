@@ -317,7 +317,7 @@ w_change = st.sidebar.slider(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**0건 가능 출력 규칙(정상 데이터에서 최대한 안 뜨게)**")
+st.sidebar.markdown("**AND(엄격) 고정: 0건 가능 출력 규칙**")
 
 p_flag = st.sidebar.slider(
     "최종 점수(flag_score) 퍼센타일 컷",
@@ -346,11 +346,6 @@ p_change = st.sidebar.slider(
     max_value=0.99,
     value=0.95,
     step=0.01,
-)
-
-rule = st.sidebar.radio(
-    "후보 선택 규칙",
-    ["OR(권장): flag AND (Beneish OR ISO OR Δ)", "AND(엄격): flag AND Beneish AND ISO AND Δ"],
 )
 
 st.sidebar.markdown("---")
@@ -398,25 +393,17 @@ except Exception as e:
     st.error(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
     st.stop()
 
-df_top_all = df_scored.head(top_n).copy()
-
 thr_flag = float(df_scored["flag_score"].quantile(p_flag))
 thr_b = float(df_scored["mscore_norm"].quantile(p_beneish))
 thr_i = float(df_scored["iso_score"].quantile(p_iso))
 thr_c = float(df_scored["change_score"].quantile(p_change))
 
-if rule.startswith("OR"):
-    mask = (df_scored["flag_score"] >= thr_flag) & (
-        (df_scored["mscore_norm"] >= thr_b)
-        | (df_scored["iso_score"] >= thr_i)
-        | (df_scored["change_score"] >= thr_c)
-    )
-else:
-    mask = (df_scored["flag_score"] >= thr_flag) & (
-        (df_scored["mscore_norm"] >= thr_b)
-        & (df_scored["iso_score"] >= thr_i)
-        & (df_scored["change_score"] >= thr_c)
-    )
+mask = (
+    (df_scored["flag_score"] >= thr_flag)
+    & (df_scored["mscore_norm"] >= thr_b)
+    & (df_scored["iso_score"] >= thr_i)
+    & (df_scored["change_score"] >= thr_c)
+)
 
 df_candidates = df_scored[mask].copy().sort_values("flag_score", ascending=False).reset_index(drop=True)
 df_candidates["rank"] = np.arange(1, len(df_candidates) + 1)
@@ -426,13 +413,13 @@ tab1, tab2, tab3 = st.tabs(
 )
 
 with tab1:
-    st.subheader("의심 후보 Top-N (0건 가능)")
+    st.subheader("의심 후보 Top-N (0건 가능, AND 고정)")
 
     st.caption(
         f"컷 기준: flag≥p{int(p_flag*100)}({thr_flag:.4f}), "
         f"Beneish≥p{int(p_beneish*100)}({thr_b:.4f}), "
         f"ISO≥p{int(p_iso*100)}({thr_i:.4f}), "
-        f"Δ≥p{int(p_change*100)}({thr_c:.4f}) | 규칙={rule.split(':')[0]}"
+        f"Δ≥p{int(p_change*100)}({thr_c:.4f}) | 규칙=AND"
     )
 
     if df_candidates.empty:
@@ -477,44 +464,6 @@ with tab1:
                 f"**#{int(r['rank'])} {r['company']} ({int(r['year'])})**  \n"
                 f"- 점수 분해: Beneish {float(r['score_beneish_part']):.3f} / ISO {float(r['score_iso_part']):.3f} / Δ {float(r['score_change_part']):.3f} / 합 {float(r['flag_score']):.3f}  \n"
                 f"- Top3 요인: {r['reason_1']} · {r['reason_2']} · {r['reason_3']}"
-            )
-
-    st.markdown("---")
-    st.subheader("‘일관 의심 기업’(현재 설정 Top-N 안에서)")
-    if st.session_state.get("base_top_ids") is None:
-        base_params = {
-            "group_mode": group_mode_key,
-            "contamination": 0.10,
-            "w_beneish": 1.0,
-            "w_iso": 1.0,
-            "w_change": 1.0,
-        }
-        base_df, _ = run_pipeline(
-            df_raw,
-            group_mode=base_params["group_mode"],
-            contamination=base_params["contamination"],
-            w_beneish=base_params["w_beneish"],
-            w_iso=base_params["w_iso"],
-            w_change=base_params["w_change"],
-        )
-        base_top = base_df.head(top_n).copy()
-        st.session_state["base_top_ids"] = set(base_top["row_id"].tolist())
-        st.session_state["base_params"] = base_params
-
-    if df_candidates.empty:
-        st.info("후보가 0건이라 일관 의심 기업도 없습니다.")
-    else:
-        current_ids = set(df_candidates.head(top_n)["row_id"].tolist())
-        stable_ids = current_ids.intersection(st.session_state["base_top_ids"])
-        stable_df = df_candidates.head(top_n)[df_candidates.head(top_n)["row_id"].isin(stable_ids)].copy()
-
-        if stable_df.empty:
-            st.info("현재 기준에서는 ‘일관 의심’으로 남는 항목이 없습니다.")
-        else:
-            st.dataframe(
-                stable_df[[c for c in ["rank","company","year","industry","flag_score","reason_1","reason_2","reason_3"] if c in stable_df.columns]],
-                use_container_width=True,
-                height=220,
             )
 
 with tab2:
@@ -656,6 +605,5 @@ with tab3:
 - iso_score(ISO 이상치): 4개 지표 조합이 다변량 관점에서 “특이한 조합”인지 Isolation Forest로 점수화
 
 - change_score(전년대비 변화): 같은 회사의 전년 대비 지표 변화(Δ)가 동종 대비 얼마나 급격한지 점수화
-  (조작 시나리오가 한 해에 몰리면 여기 점수가 크게 튀기 쉬움)
 """
     )
