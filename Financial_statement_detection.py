@@ -19,10 +19,12 @@ st.set_page_config(
     layout="wide",
 )
 
+
 def reset_session_for_new_file(filename: str):
     st.session_state["uploaded_name"] = filename
     st.session_state["base_top_ids"] = None
     st.session_state["base_params"] = None
+
 
 def _normalize_column_name(col):
     s = str(col)
@@ -34,15 +36,15 @@ def _normalize_column_name(col):
     s = " ".join(s.split())
     return s.strip()
 
+
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [_normalize_column_name(c) for c in df.columns]
     return df
 
-def _read_uploaded_file(uploaded) -> pd.DataFrame:
-    name = uploaded.name.lower()
 
-    if name.endswith(".csv"):
+def _read_uploaded_file(uploaded) -> pd.DataFrame:
+    if uploaded.name.lower().endswith(".csv"):
         raw = uploaded.getvalue()
         try:
             return pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig")
@@ -50,6 +52,7 @@ def _read_uploaded_file(uploaded) -> pd.DataFrame:
             return pd.read_csv(io.BytesIO(raw), encoding="cp949")
     else:
         return pd.read_excel(uploaded)
+
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -60,27 +63,18 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "year": ["year", "결산연도", "연도"],
         "industry": ["industry", "업종", "산업"],
         "sales": ["sales", "매출액", "수익"],
-        "cogs": ["cogs", "매출원가"],
-        "sga": ["sga", "판매관리비"],
-        "ebit": ["ebit", "영업이익"],
-        "depr": ["depr", "감가상각비"],
         "ar": ["ar", "accounts_receivable", "매출채권"],
         "inventory": ["inventory", "재고자산"],
         "total_assets": ["total_assets", "자산총계", "총자산"],
-        "total_liabilities": ["total_liabilities", "부채총계", "총부채"],
         "ocf": ["ocf", "영업활동현금흐름", "영업현금흐름"],
         "net_income": ["net_income", "당기순이익"],
     }
 
-    normalized_cols = {_normalize_column_name(c): c for c in df.columns}
-
     col_map = {}
     for canonical, cands in aliases.items():
-        for cand in cands:
-            cand_norm = _normalize_column_name(cand)
-            if cand_norm in normalized_cols:
-                original_col = normalized_cols[cand_norm]
-                col_map[original_col] = canonical
+        for c in cands:
+            if c in df.columns:
+                col_map[c] = canonical
                 break
 
     df = df.rename(columns=col_map)
@@ -95,7 +89,6 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "ocf",
         "net_income",
     ]
-
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
@@ -108,11 +101,10 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
 def _clean_numeric_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     df = df.copy()
     for col in cols:
-        if col not in df.columns:
-            continue
         s = df[col].astype(str)
         s = s.str.replace(",", "", regex=False)
         s = s.str.replace(" ", "", regex=False)
@@ -120,13 +112,13 @@ def _clean_numeric_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
         df[col] = pd.to_numeric(s, errors="coerce")
     return df
 
+
 def _norm01(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=float)
-    if len(x) == 0:
-        return x
     mn = np.nanmin(x)
     mx = np.nanmax(x)
     return (x - mn) / (mx - mn + 1e-9)
+
 
 def _safe_zscore(series: pd.Series) -> pd.Series:
     m = series.mean()
@@ -134,6 +126,7 @@ def _safe_zscore(series: pd.Series) -> pd.Series:
     if s is None or s == 0 or np.isnan(s):
         return pd.Series(0.0, index=series.index)
     return (series - m) / s
+
 
 def _metric_label_map():
     return {
@@ -145,6 +138,7 @@ def _metric_label_map():
         "iso_score": "iso_score(ISO 이상치)",
         "change_score": "change_score(전년대비 변화)",
     }
+
 
 def run_pipeline(
     df_raw: pd.DataFrame,
@@ -158,29 +152,12 @@ def run_pipeline(
 
     df = _clean_numeric_cols(
         df,
-        [
-            "sales",
-            "cogs",
-            "sga",
-            "ebit",
-            "depr",
-            "ar",
-            "inventory",
-            "total_assets",
-            "total_liabilities",
-            "ocf",
-            "net_income",
-        ],
+        ["sales", "ar", "inventory", "total_assets", "ocf", "net_income"],
     )
 
     df = df.reset_index(drop=True)
     df["row_id"] = df.index + 1
     df["year"] = pd.to_numeric(df["year"], errors="coerce")
-
-    if df["year"].isna().all():
-        raise ValueError(
-            "결산연도(year) 컬럼을 숫자로 변환하지 못했습니다. 연도 값이 숫자 형태인지 확인해주세요."
-        )
 
     eps = 1e-9
 
@@ -190,18 +167,24 @@ def run_pipeline(
     df["tata"] = (df["net_income"] - df["ocf"]) / (df["total_assets"] + eps)
 
     df = df.sort_values(["company", "year"])
-    df["sales_yoy"] = df.groupby("company")["sales"].pct_change().fillna(0.0) * 100.0
+    df["sales_yoy"] = (
+        df.groupby("company")["sales"].pct_change().fillna(0.0) * 100.0
+    )
 
     metrics = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
 
     def zscore_group(g: pd.DataFrame, cols: list):
         g = g.copy()
         for c in cols:
-            g[str(c) + "_z"] = _safe_zscore(g[str(c)])
+            col_name = str(c)
+            g[col_name + "_z"] = _safe_zscore(g[col_name])
         return g
 
     if group_mode == "year_industry":
-        df = df.groupby(["year", "industry"], group_keys=False).apply(zscore_group, cols=metrics)
+        df = (
+            df.groupby(["year", "industry"], group_keys=False)
+            .apply(zscore_group, cols=metrics)
+        )
     else:
         df = zscore_group(df, metrics)
 
@@ -222,7 +205,8 @@ def run_pipeline(
         )
         iso.fit(X)
         iso_raw = -iso.decision_function(X)
-        iso_norm = _norm01(np.array(iso_raw))
+        iso_raw = np.array(iso_raw)
+        iso_norm = _norm01(iso_raw)
     except Exception:
         iso_norm = np.zeros(df.shape[0])
 
@@ -235,7 +219,10 @@ def run_pipeline(
     delta_cols = [m + "_d1" for m in metrics]
 
     if group_mode == "year_industry":
-        df = df.groupby(["year", "industry"], group_keys=False).apply(zscore_group, cols=delta_cols)
+        df = (
+            df.groupby(["year", "industry"], group_keys=False)
+            .apply(zscore_group, cols=delta_cols)
+        )
     else:
         df = zscore_group(df, delta_cols)
 
@@ -246,7 +233,8 @@ def run_pipeline(
     df["change_score"] = _norm01(change_raw)
 
     m = df["mscore_raw"].fillna(0.0).values
-    df["mscore_norm"] = _norm01(m)
+    m_norm = _norm01(m)
+    df["mscore_norm"] = m_norm
 
     df["score_beneish_part"] = w_beneish * df["mscore_norm"].values
     df["score_iso_part"] = w_iso * df["iso_score"].values
@@ -294,6 +282,7 @@ def run_pipeline(
     }
 
     return df_scored, meta
+
 
 st.sidebar.header("옵션")
 
@@ -391,7 +380,6 @@ if "uploaded_name" not in st.session_state or st.session_state["uploaded_name"] 
 
 try:
     df_raw = _read_uploaded_file(uploaded)
-    df_raw = _normalize_columns(df_raw)
 except Exception as e:
     st.error(f"⚠️ 파일을 읽는 중 오류가 발생했습니다: {e}")
     st.stop()
@@ -581,11 +569,12 @@ with tab2:
                     else:
                         peer_z = peer.copy()
                         for m in metrics:
-                            mm = peer[m].mean()
-                            ss = peer[m].std(ddof=0) or 1e-9
-                            peer_z[m + "_z_peer"] = (peer[m] - mm) / ss
+                            col_name = str(m)
+                            mm = peer[col_name].mean()
+                            ss = peer[col_name].std(ddof=0) or 1e-9
+                            peer_z[col_name + "_z_peer"] = (peer[col_name] - mm) / ss
 
-                        z_cols = [m + "_z_peer" for m in metrics]
+                        z_cols = [str(m) + "_z_peer" for m in metrics]
                         z_vals = peer_z[z_cols].values
                         labels = [
                             f"{r['company']}_{int(r['year'])}"
