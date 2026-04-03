@@ -1,610 +1,590 @@
 import io
-import math
+import os
+
+import matplotlib.pyplot as plt
+from matplotlib import font_manager, rcParams
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
-
 from sklearn.ensemble import IsolationForest
 
-st.set_page_config(page_title="부정회계 탐지 스크리닝", layout="wide")
-st.title("부정회계 탐지 스크리닝")
+font_path = "NotoSansKR-Regular.ttf"
+if os.path.exists(font_path):
+    font_manager.fontManager.addfont(font_path)
+    rcParams["font.family"] = "Noto Sans KR"
+    rcParams["axes.unicode_minus"] = False
 
-ALIASES = {
-    "company": ["company", "회사명", "법인명", "기업명"],
-    "year": ["year", "결산연도", "연도"],
-    "industry": ["industry", "업종", "산업", "섹터"],
-    "sales": ["sales", "매출액", "수익", "매출"],
-    "cogs": ["cogs", "매출원가"],
-    "sga": ["sga", "판매비와관리비", "판관비"],
-    "ebit": ["ebit", "영업이익"],
-    "depr": ["depr", "감가상각비", "감가상각"],
-    "ar": ["ar", "accounts_receivable", "매출채권"],
-    "inventory": ["inventory", "재고자산", "재고"],
-    "total_assets": ["total_assets", "자산총계", "총자산"],
-    "total_liabilities": ["total_liabilities", "부채총계", "총부채"],
-    "ocf": ["ocf", "영업활동현금흐름", "영업현금흐름"],
-    "net_income": ["net_income", "당기순이익", "순이익"]
-}
-
-NUMERIC_CANDIDATES = [
-    "year", "sales", "cogs", "sga", "ebit", "depr", "ar", "inventory",
-    "total_assets", "total_liabilities", "ocf", "net_income"
-]
+st.set_page_config(
+    page_title="부정회계 탐지 스크리닝",
+    layout="wide",
+)
 
 
-def _normalize_column_name(col):
-    col = str(col)
-    col = col.replace("\ufeff", "")
-    col = col.replace("\xa0", " ")
-    col = col.strip()
-    col = " ".join(col.split())
-    return col
+def reset_session_for_new_file(filename: str):
+    st.session_state["uploaded_name"] = filename
+    st.session_state["base_top_ids"] = None
+    st.session_state["base_params"] = None
 
 
-def _normalize_columns(df):
+def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df.columns = [_normalize_column_name(c) for c in df.columns]
-    return df
 
+    aliases = {
+        "company": ["company", "회사명", "법인명"],
+        "year": ["year", "결산연도", "연도"],
+        "industry": ["industry", "업종", "산업"],
+        "sales": ["sales", "매출액", "수익"],
+        "ar": ["ar", "accounts_receivable", "매출채권"],
+        "inventory": ["inventory", "재고자산"],
+        "total_assets": ["total_assets", "자산총계", "총자산"],
+        "ocf": ["ocf", "영업활동현금흐름", "영업현금흐름"],
+        "net_income": ["net_income", "당기순이익"],
+    }
 
-def _read_uploaded_file(uploaded):
-    name = uploaded.name.lower()
-
-    if name.endswith(".csv"):
-        raw = uploaded.getvalue()
-        for enc in ["utf-8-sig", "cp949", "utf-8"]:
-            try:
-                return pd.read_csv(io.BytesIO(raw), encoding=enc)
-            except Exception:
-                continue
-        return pd.read_csv(io.BytesIO(raw))
-
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        return pd.read_excel(uploaded)
-
-    raise ValueError("csv 또는 xlsx 파일만 업로드할 수 있습니다.")
-
-
-def _safe_to_numeric(series):
-    return pd.to_numeric(
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace(" ", "", regex=False)
-        .str.replace("\xa0", "", regex=False),
-        errors="coerce"
-    )
-
-
-def _apply_aliases(df):
-    df = _normalize_columns(df)
-    current_cols = list(df.columns)
-    rename_map = {}
-
-    normalized_lookup = {}
-    for c in current_cols:
-        key = c.lower().replace(" ", "").replace("_", "")
-        normalized_lookup[key] = c
-
-    for standard, candidates in ALIASES.items():
-        found = None
-        for cand in candidates:
-            cand_key = str(cand).lower().replace(" ", "").replace("_", "")
-            if cand_key in normalized_lookup:
-                found = normalized_lookup[cand_key]
+    col_map = {}
+    for canonical, cands in aliases.items():
+        for c in cands:
+            if c in df.columns:
+                col_map[c] = canonical
                 break
-        if found is not None and found != standard:
-            rename_map[found] = standard
 
-    df = df.rename(columns=rename_map)
-    return df
+    df = df.rename(columns=col_map)
 
-
-def _ensure_columns(df):
-    df = _apply_aliases(df)
+    required = [
+        "company",
+        "year",
+        "sales",
+        "ar",
+        "inventory",
+        "total_assets",
+        "ocf",
+        "net_income",
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"필수 컬럼이 누락되었습니다: {missing}. "
+            f"현재 컬럼: {list(df.columns)}"
+        )
 
     if "industry" not in df.columns:
         df["industry"] = "미지정"
 
-    required = ["company", "year", "sales", "ar", "inventory", "total_assets", "ocf", "net_income"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"필수 컬럼이 누락되었습니다: {missing}")
-
-    for col in NUMERIC_CANDIDATES:
-        if col in df.columns:
-            df[col] = _safe_to_numeric(df[col])
-
-    df["company"] = df["company"].astype(str).str.strip()
-    df["industry"] = df["industry"].astype(str).str.strip().replace("", "미지정")
-    df["year"] = pd.to_numeric(df["year"], errors="coerce")
-
-    df = df.dropna(subset=["company", "year", "sales", "ar", "inventory", "total_assets", "ocf", "net_income"]).copy()
-    df["year"] = df["year"].astype(int)
-
     return df
 
 
-def _winsorize_series(s, lower=0.01, upper=0.99):
-    s = pd.to_numeric(s, errors="coerce")
-    if s.notna().sum() < 3:
-        return s
-    lo = s.quantile(lower)
-    hi = s.quantile(upper)
-    return s.clip(lo, hi)
+def _clean_numeric_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    df = df.copy()
+    for col in cols:
+        s = df[col].astype(str)
+        s = s.str.replace(",", "", regex=False)
+        s = s.str.replace(" ", "", regex=False)
+        s = s.str.replace("\u00a0", "", regex=False)
+        df[col] = pd.to_numeric(s, errors="coerce")
+    return df
 
 
-def _robust_zscore(s):
-    s = pd.to_numeric(s, errors="coerce")
-    mean = s.mean()
-    std = s.std(ddof=0)
-    if pd.isna(std) or std == 0:
-        return pd.Series(np.zeros(len(s)), index=s.index)
-    return (s - mean) / std
+def _norm01(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    mn = np.nanmin(x)
+    mx = np.nanmax(x)
+    return (x - mn) / (mx - mn + 1e-9)
 
 
-def _group_zscore(df, col, mode):
-    vals = pd.to_numeric(df[col], errors="coerce")
-
-    if mode == "all":
-        return _robust_zscore(vals)
-
-    if mode == "year":
-        return df.groupby(["year"], dropna=False)[col].transform(lambda x: _robust_zscore(pd.to_numeric(x, errors="coerce")))
-
-    if mode == "year_industry":
-        return df.groupby(["year", "industry"], dropna=False)[col].transform(lambda x: _robust_zscore(pd.to_numeric(x, errors="coerce")))
-
-    return _robust_zscore(vals)
+def _safe_zscore(series: pd.Series) -> pd.Series:
+    m = series.mean()
+    s = series.std(ddof=0)
+    if s is None or s == 0 or np.isnan(s):
+        return pd.Series(0.0, index=series.index)
+    return (series - m) / s
 
 
-def _minmax_scale(s):
-    s = pd.to_numeric(s, errors="coerce")
-    mn = s.min()
-    mx = s.max()
-    if pd.isna(mn) or pd.isna(mx) or mx == mn:
-        return pd.Series(np.zeros(len(s)), index=s.index)
-    return (s - mn) / (mx - mn)
-
-
-def _first_digit(x):
-    if pd.isna(x):
-        return np.nan
-    x = abs(float(x))
-    if x <= 0:
-        return np.nan
-    while x < 1:
-        x *= 10
-    while x >= 10:
-        x /= 10
-    return int(x)
-
-
-def _benford_expected():
-    return np.array([math.log10(1 + 1 / d) for d in range(1, 10)])
-
-
-def _benford_stats(values):
-    digits = pd.Series(values).dropna().apply(_first_digit).dropna()
-    digits = digits[digits.between(1, 9)]
-
-    n = len(digits)
-    nonzero_vals = pd.Series(values).dropna()
-    nonzero_vals = nonzero_vals[nonzero_vals != 0]
-    if len(nonzero_vals) > 0:
-        span = abs(nonzero_vals).max() / max(abs(nonzero_vals).min(), 1e-12)
-    else:
-        span = np.nan
-
-    exp = _benford_expected()
-    obs_counts = digits.value_counts().reindex(range(1, 10), fill_value=0).sort_index()
-    obs = obs_counts / obs_counts.sum() if obs_counts.sum() > 0 else pd.Series(np.zeros(9), index=range(1, 10))
-    mad = np.mean(np.abs(obs.values - exp))
-
-    applicable = True
-    reasons = []
-    if n < 100:
-        applicable = False
-        reasons.append(f"표본 수(n={n})가 충분하지 않습니다(권장 100개 이상).")
-    if pd.isna(span) or span < 100:
-        applicable = False
-        if pd.isna(span):
-            reasons.append("값의 범위(span)를 계산하기 어렵습니다.")
-        else:
-            reasons.append(f"값의 범위(span={span:.1f})가 충분히 넓지 않습니다(권장 100 이상).")
-
+def _metric_label_map():
     return {
-        "n": n,
-        "span": span,
-        "mad": mad,
-        "obs": obs.values,
-        "exp": exp,
-        "digits": list(range(1, 10)),
-        "applicable": applicable,
-        "reason_text": " / ".join(reasons) if reasons else ""
+        "ar_to_sales": "AR/Sales(매출채권/매출액)",
+        "inv_to_sales": "Inv/Sales(재고자산/매출액)",
+        "tata": "TATA((NI-OCF)/자산)",
+        "ocf_to_ni": "OCF/NI(영업CF/순이익)",
+        "mscore_raw": "mscore_raw(간이 Beneish)",
+        "iso_score": "iso_score(ISO 이상치)",
+        "change_score": "change_score(전년대비 변화)",
     }
 
 
-def _continuous_years_count(years):
-    years = sorted(pd.Series(years).dropna().astype(int).unique())
-    if not years:
-        return 0
-    longest = 1
-    cur = 1
-    for i in range(1, len(years)):
-        if years[i] == years[i - 1] + 1:
-            cur += 1
-            longest = max(longest, cur)
-        else:
-            cur = 1
-    return longest
+def run_pipeline(
+    df_raw: pd.DataFrame,
+    group_mode: str = "year_industry",
+    contamination: float = 0.10,
+    w_beneish: float = 1.0,
+    w_iso: float = 1.0,
+    w_change: float = 1.0,
+):
+    df = _ensure_columns(df_raw)
 
-
-def _prepare_features(df):
-    df = df.copy()
-
-    df["ar_to_sales"] = df["ar"] / df["sales"].replace(0, np.nan)
-    df["inv_to_sales"] = df["inventory"] / df["sales"].replace(0, np.nan)
-    df["tata"] = (df["net_income"] - df["ocf"]) / df["total_assets"].replace(0, np.nan)
-    df["ocf_to_ni"] = df["ocf"] / df["net_income"].replace(0, np.nan)
-
-    for c in ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]:
-        df[c] = _winsorize_series(df[c])
-
-    return df
-
-
-def _run_pipeline(df, group_mode="year_industry", contamination=0.10, w_beneish=1.0, w_iforest=1.0, w_benford=1.0):
-    df = _prepare_features(df)
-
-    df["ar_to_sales_z"] = _group_zscore(df, "ar_to_sales", group_mode)
-    df["inv_to_sales_z"] = _group_zscore(df, "inv_to_sales", group_mode)
-    df["tata_z"] = _group_zscore(df, "tata", group_mode)
-    df["ocf_to_ni_z"] = _group_zscore(df, "ocf_to_ni", group_mode)
-
-    df["mscore_raw"] = (
-        df["ar_to_sales_z"].fillna(0)
-        + df["inv_to_sales_z"].fillna(0)
-        + df["tata_z"].fillna(0)
-        - df["ocf_to_ni_z"].fillna(0)
+    df = _clean_numeric_cols(
+        df,
+        ["sales", "ar", "inventory", "total_assets", "ocf", "net_income"],
     )
 
-    feature_cols = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
-    X = df[feature_cols].replace([np.inf, -np.inf], np.nan).copy()
-    X = X.fillna(X.median(numeric_only=True))
-    X = X.fillna(0)
+    df = df.reset_index(drop=True)
+    df["row_id"] = df.index + 1
+    df["year"] = pd.to_numeric(df["year"], errors="coerce")
 
-    if len(X) >= 5:
+    eps = 1e-9
+
+    df["ar_to_sales"] = df["ar"] / (df["sales"] + eps)
+    df["inv_to_sales"] = df["inventory"] / (df["sales"] + eps)
+    df["ocf_to_ni"] = df["ocf"] / (df["net_income"] + eps)
+    df["tata"] = (df["net_income"] - df["ocf"]) / (df["total_assets"] + eps)
+
+    df = df.sort_values(["company", "year"])
+    df["sales_yoy"] = (
+        df.groupby("company")["sales"].pct_change().fillna(0.0) * 100.0
+    )
+
+    metrics = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
+
+    def zscore_group(g: pd.DataFrame, cols: list):
+        g = g.copy()
+        for c in cols:
+            col_name = str(c)
+            g[col_name + "_z"] = _safe_zscore(g[col_name])
+        return g
+
+    if group_mode == "year_industry":
+        df = (
+            df.groupby(["year", "industry"], group_keys=False)
+            .apply(zscore_group, cols=metrics)
+        )
+    else:
+        df = zscore_group(df, metrics)
+
+    z_ar = df.get("ar_to_sales_z", pd.Series(0, index=df.index))
+    z_inv = df.get("inv_to_sales_z", pd.Series(0, index=df.index))
+    z_tata = df.get("tata_z", pd.Series(0, index=df.index))
+    z_ocf = df.get("ocf_to_ni_z", pd.Series(0, index=df.index))
+
+    df["mscore_raw"] = z_ar + z_inv + z_tata - z_ocf
+
+    iso_features = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
+    X = df[iso_features].fillna(0.0).values
+
+    try:
         iso = IsolationForest(
-            n_estimators=300,
-            contamination=float(contamination),
-            random_state=42
+            contamination=contamination,
+            random_state=42,
         )
         iso.fit(X)
-        raw_score = -iso.score_samples(X)
-        df["iso_score"] = raw_score
+        iso_raw = -iso.decision_function(X)
+        iso_raw = np.array(iso_raw)
+        iso_norm = _norm01(iso_raw)
+    except Exception:
+        iso_norm = np.zeros(df.shape[0])
+
+    df["iso_score"] = iso_norm
+
+    df = df.sort_values(["company", "year"])
+    for m in metrics:
+        df[m + "_d1"] = df.groupby("company")[m].diff().fillna(0.0)
+
+    delta_cols = [m + "_d1" for m in metrics]
+
+    if group_mode == "year_industry":
+        df = (
+            df.groupby(["year", "industry"], group_keys=False)
+            .apply(zscore_group, cols=delta_cols)
+        )
     else:
-        df["iso_score"] = 0.0
+        df = zscore_group(df, delta_cols)
 
-    benford_map = {}
-    benford_detail = {}
+    change_raw = np.zeros(df.shape[0], dtype=float)
+    for m in metrics:
+        change_raw += np.abs(df[m + "_d1_z"].fillna(0.0).values)
 
-    for (year, industry), g in df.groupby(["year", "industry"], dropna=False):
-        stats = _benford_stats(g["sales"])
-        benford_detail[(year, industry)] = stats
-        benford_map[(year, industry)] = stats["mad"] if stats["applicable"] else np.nan
+    df["change_score"] = _norm01(change_raw)
 
-    df["benford_mad"] = df.apply(lambda r: benford_map.get((r["year"], r["industry"]), np.nan), axis=1)
+    m = df["mscore_raw"].fillna(0.0).values
+    m_norm = _norm01(m)
+    df["mscore_norm"] = m_norm
 
-    mscore_norm = _minmax_scale(df["mscore_raw"].fillna(0))
-    iso_norm = _minmax_scale(df["iso_score"].fillna(0))
-    benford_norm = _minmax_scale(df["benford_mad"].fillna(0))
+    df["score_beneish_part"] = w_beneish * df["mscore_norm"].values
+    df["score_iso_part"] = w_iso * df["iso_score"].values
+    df["score_change_part"] = w_change * df["change_score"].values
 
-    total_weight = max(w_beneish + w_iforest + w_benford, 1e-12)
     df["flag_score"] = (
-        w_beneish * mscore_norm
-        + w_iforest * iso_norm
-        + w_benford * benford_norm
-    ) / total_weight
+        df["score_beneish_part"].values
+        + df["score_iso_part"].values
+        + df["score_change_part"].values
+    )
 
-    baseline = _run_baseline_for_consistency(df)
-    return df, benford_detail, baseline
-
-
-def _run_baseline_for_consistency(df):
-    temp = df.copy()
-
-    mscore_norm = _minmax_scale(temp["mscore_raw"].fillna(0))
-
-    feature_cols = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
-    X = temp[feature_cols].replace([np.inf, -np.inf], np.nan).copy()
-    X = X.fillna(X.median(numeric_only=True))
-    X = X.fillna(0)
-
-    if len(X) >= 5:
-        iso = IsolationForest(
-            n_estimators=300,
-            contamination=0.10,
-            random_state=42
-        )
-        iso.fit(X)
-        temp["iso_score_base"] = -iso.score_samples(X)
-    else:
-        temp["iso_score_base"] = 0.0
-
-    benford_map = {}
-    for (year, industry), g in temp.groupby(["year", "industry"], dropna=False):
-        stats = _benford_stats(g["sales"])
-        benford_map[(year, industry)] = stats["mad"] if stats["applicable"] else np.nan
-
-    temp["benford_mad_base"] = temp.apply(lambda r: benford_map.get((r["year"], r["industry"]), np.nan), axis=1)
-
-    iso_norm = _minmax_scale(temp["iso_score_base"].fillna(0))
-    benford_norm = _minmax_scale(temp["benford_mad_base"].fillna(0))
-
-    temp["flag_score_base"] = (mscore_norm + iso_norm + benford_norm) / 3
-    return temp
-
-
-def _top_n_table(df, top_n):
-    show_cols = [
-        "company", "year", "industry", "flag_score", "mscore_raw", "iso_score",
-        "benford_mad", "ar_to_sales", "inv_to_sales", "ocf_to_ni"
+    label_map = _metric_label_map()
+    reason_pool = [
+        ("ar_to_sales_z", label_map["ar_to_sales"]),
+        ("inv_to_sales_z", label_map["inv_to_sales"]),
+        ("tata_z", label_map["tata"]),
+        ("ocf_to_ni_z", label_map["ocf_to_ni"]),
+        ("ar_to_sales_d1_z", "Δ " + label_map["ar_to_sales"]),
+        ("inv_to_sales_d1_z", "Δ " + label_map["inv_to_sales"]),
+        ("tata_d1_z", "Δ " + label_map["tata"]),
+        ("ocf_to_ni_d1_z", "Δ " + label_map["ocf_to_ni"]),
     ]
-    show_cols = [c for c in show_cols if c in df.columns]
-    out = df.sort_values("flag_score", ascending=False).head(top_n).copy()
-    out.insert(0, "rank", range(1, len(out) + 1))
-    return out[["rank"] + show_cols]
+
+    def pick_reasons(row: pd.Series):
+        scores = []
+        for col, label in reason_pool:
+            v = row.get(col, 0.0)
+            if pd.isna(v):
+                v = 0.0
+            scores.append((abs(float(v)), float(v), label))
+        scores.sort(key=lambda x: x[0], reverse=True)
+        top3 = scores[:3]
+        r1 = f"{top3[0][2]}: {top3[0][1]:+.2f}"
+        r2 = f"{top3[1][2]}: {top3[1][1]:+.2f}"
+        r3 = f"{top3[2][2]}: {top3[2][1]:+.2f}"
+        return pd.Series([r1, r2, r3])
+
+    df[["reason_1", "reason_2", "reason_3"]] = df.apply(pick_reasons, axis=1)
+
+    df_scored = df.sort_values("flag_score", ascending=False).reset_index(drop=True)
+    df_scored["rank"] = np.arange(1, len(df_scored) + 1)
+
+    meta = {
+        "label_map": label_map,
+    }
+
+    return df_scored, meta
 
 
-def _consistent_suspects(current_df, baseline_df, top_n):
-    cur = current_df.sort_values("flag_score", ascending=False).head(top_n)[["company", "year"]].copy()
-    base = baseline_df.sort_values("flag_score_base", ascending=False).head(top_n)[["company", "year"]].copy()
+st.sidebar.header("옵션")
 
-    cur["key"] = cur["company"].astype(str) + "_" + cur["year"].astype(str)
-    base["key"] = base["company"].astype(str) + "_" + base["year"].astype(str)
+group_mode = st.sidebar.radio(
+    "그룹 표준화 기준",
+    ["연도+산업", "전체"],
+)
 
-    inter = set(cur["key"]).intersection(set(base["key"]))
-    if not inter:
-        return pd.DataFrame(columns=["company", "year"])
+if group_mode == "연도+산업":
+    group_mode_key = "year_industry"
+else:
+    group_mode_key = "all"
 
-    rows = []
-    for key in inter:
-        company, year = key.rsplit("_", 1)
-        rows.append({"company": company, "year": int(year)})
+contamination = st.sidebar.slider(
+    "탐지 민감도(의심 비율, ISO contamination)",
+    min_value=0.01,
+    max_value=0.30,
+    value=0.10,
+    step=0.01,
+)
 
-    out = pd.DataFrame(rows).sort_values(["year", "company"]).reset_index(drop=True)
-    return out
+top_n = st.sidebar.slider(
+    "Top-N(표시 개수)",
+    min_value=3,
+    max_value=50,
+    value=10,
+    step=1,
+)
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("**가중치 설정**")
 
-def _company_year_warning(df):
-    counts = df.groupby("company")["year"].apply(_continuous_years_count).reset_index(name="continuous_years")
-    short = counts[counts["continuous_years"] < 3]
-    return short
+w_beneish = st.sidebar.slider(
+    "Beneish(간이) 비중",
+    min_value=0.0,
+    max_value=3.0,
+    value=1.0,
+    step=0.1,
+)
+w_iso = st.sidebar.slider(
+    "Isolation Forest 비중",
+    min_value=0.0,
+    max_value=3.0,
+    value=1.0,
+    step=0.1,
+)
+w_change = st.sidebar.slider(
+    "전년대비 변화(Δ) 비중",
+    min_value=0.0,
+    max_value=3.0,
+    value=1.0,
+    step=0.1,
+)
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("**AND 고정 + 상위 % 컷(기본 0.80) 고정**")
 
-def _peer_group_heatmap_source(df):
-    out = df.copy()
-    out["size_metric"] = np.log1p(out["total_assets"].clip(lower=0))
-    out["growth_metric"] = out.groupby("company")["sales"].pct_change()
-    out["profit_metric"] = out["net_income"] / out["sales"].replace(0, np.nan)
+p_flag = 0.80
+p_beneish = 0.80
+p_iso = 0.80
+p_change = 0.80
 
-    for c in ["size_metric", "growth_metric", "profit_metric", "ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]:
-        out[c] = out[c].replace([np.inf, -np.inf], np.nan)
+st.sidebar.write(f"최종 점수(flag_score) 상위 {(1 - p_flag) * 100:.0f}% 컷")
+st.sidebar.write(f"Beneish 상위 {(1 - p_beneish) * 100:.0f}% 컷")
+st.sidebar.write(f"ISO 상위 {(1 - p_iso) * 100:.0f}% 컷")
+st.sidebar.write(f"변화(Δ) 상위 {(1 - p_change) * 100:.0f}% 컷")
 
-    return out
+st.sidebar.markdown("---")
+st.sidebar.info(
+    "📎 필수 항목: 회사명, 결산연도, 매출액, 매출채권, 재고자산, 자산총계, 영업활동현금흐름, 당기순이익, 업종(권장)"
+)
 
-
-def _peer_group_for_focus(df, focus_company, focus_year, focus_industry, k=5):
-    sub = df[(df["year"] == focus_year) & (df["industry"] == focus_industry)].copy()
-    sub = sub.dropna(subset=["company"])
-    if sub.empty:
-        return pd.DataFrame()
-
-    metric_cols = ["size_metric", "growth_metric", "profit_metric"]
-    for c in metric_cols:
-        sub[c + "_z"] = _robust_zscore(sub[c])
-
-    focus = sub[sub["company"] == focus_company].copy()
-    if focus.empty:
-        return pd.DataFrame()
-
-    focus_row = focus.iloc[0]
-    dist = (
-        (sub["size_metric_z"] - focus_row["size_metric_z"]) ** 2
-        + (sub["growth_metric_z"] - focus_row["growth_metric_z"]) ** 2
-        + (sub["profit_metric_z"] - focus_row["profit_metric_z"]) ** 2
-    ) ** 0.5
-    sub["distance"] = dist
-
-    k = max(3, min(int(k), min(10, len(sub))))
-    peers = sub.sort_values("distance").head(k).copy()
-
-    heat_cols = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
-    for c in heat_cols:
-        peers[c + "_z"] = _robust_zscore(peers[c])
-
-    heat = peers[["company"] + [c + "_z" for c in heat_cols]].set_index("company")
-    heat.columns = ["매출채권/매출", "재고자산/매출", "TATA", "OCF/순이익"]
-    return heat
-
-
-uploaded = st.file_uploader("CSV 또는 XLSX 파일 업로드", type=["csv", "xlsx", "xls"])
-
-with st.sidebar:
-    st.header("설정")
-    group_mode_label = st.radio(
-        "그룹 표준화 기준",
-        ["연도", "연도+산업", "전체"],
-        index=1
-    )
-
-    group_mode = {
-        "연도": "year",
-        "연도+산업": "year_industry",
-        "전체": "all"
-    }[group_mode_label]
-
-    contamination = st.slider(
-        "Isolation Forest 이상치 비율",
-        min_value=0.01,
-        max_value=0.30,
-        value=0.10,
-        step=0.01
-    )
-
-    top_n = st.slider(
-        "Top-N",
-        min_value=3,
-        max_value=30,
-        value=10,
-        step=1
-    )
-
-    w_beneish = st.slider("Beneish 가중치", 0.0, 3.0, 1.0, 0.1)
-    w_iforest = st.slider("Isolation Forest 가중치", 0.0, 3.0, 1.0, 0.1)
-    w_benford = st.slider("Benford 가중치", 0.0, 3.0, 1.0, 0.1)
+st.title("부정회계 탐지 스크리닝")
 
 st.markdown(
     """
-필수 항목 예시: 회사명, 결산연도, 업종, 매출액, 매출채권, 재고자산, 자산총계, 영업활동현금흐름, 당기순이익
+1. 아래에 CSV/엑셀 파일을 업로드하세요.  
+2. 필수 항목이 들어있어야 합니다. (회사명, 결산연도, 매출액, 매출채권, 재고자산, 자산총계, 영업활동현금흐름, 당기순이익, 업종(권장))  
+3. 왼쪽에서 **탐지 민감도(ISO contamination)** 와 **가중치(Beneish/ISO/Δ)** 를 조정하며 결과 변화를 확인합니다.  
 
-권장:
-- 기업별 3개년 이상 데이터
-- 업종 컬럼 포함
-- 숫자형 데이터는 쉼표 포함 가능
+4. 하단 탭에서   
+   - 🔍 **Top-N 의심 리스트 & Top 1~3 적발 사유**,   
+   - 🌡️ **동종 그룹 열지도(동종 업계끼리 비교)**,      
+   를 확인할 수 있습니다.
 """
 )
 
-if uploaded is not None:
-    try:
-        df_raw = _read_uploaded_file(uploaded)
-        df = _ensure_columns(df_raw)
+uploaded = st.file_uploader("CSV 또는 Excel 업로드", type=["csv", "xlsx"])
 
-        short_companies = _company_year_warning(df)
-        if not short_companies.empty:
-            st.warning("일부 기업은 연속 3년 미만 데이터입니다. 시계열 해석에 주의하세요.")
+if uploaded is None:
+    st.stop()
 
-        result_df, benford_detail, baseline_df = _run_pipeline(
-            df=df,
-            group_mode=group_mode,
-            contamination=contamination,
-            w_beneish=w_beneish,
-            w_iforest=w_iforest,
-            w_benford=w_benford
+if "uploaded_name" not in st.session_state or st.session_state["uploaded_name"] != uploaded.name:
+    reset_session_for_new_file(uploaded.name)
+
+if uploaded.name.lower().endswith(".csv"):
+    df_raw = pd.read_csv(uploaded)
+else:
+    df_raw = pd.read_excel(uploaded)
+
+st.caption(f"업로드된 데이터 크기: {df_raw.shape[0]}행 × {df_raw.shape[1]}열")
+with st.expander("원본 일부 미리보기", expanded=False):
+    st.dataframe(df_raw.head())
+
+try:
+    df_scored, meta = run_pipeline(
+        df_raw,
+        group_mode=group_mode_key,
+        contamination=contamination,
+        w_beneish=w_beneish,
+        w_iso=w_iso,
+        w_change=w_change,
+    )
+except Exception as e:
+    st.error(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
+    st.stop()
+
+thr_flag = float(df_scored["flag_score"].quantile(p_flag))
+thr_b = float(df_scored["mscore_norm"].quantile(p_beneish))
+thr_i = float(df_scored["iso_score"].quantile(p_iso))
+thr_c = float(df_scored["change_score"].quantile(p_change))
+
+mask = (
+    (df_scored["flag_score"] >= thr_flag)
+    & (df_scored["mscore_norm"] >= thr_b)
+    & (df_scored["iso_score"] >= thr_i)
+    & (df_scored["change_score"] >= thr_c)
+)
+
+df_candidates = (
+    df_scored[mask]
+    .copy()
+    .sort_values("flag_score", ascending=False)
+    .reset_index(drop=True)
+)
+df_candidates["rank"] = np.arange(1, len(df_candidates) + 1)
+
+tab1, tab2, tab3 = st.tabs(
+    ["🔍 Top-N & 사유", "🌡️ 동종 그룹 열지도", "🧾 지표 뜻(발표 대비)"]
+)
+
+with tab1:
+    st.subheader("의심 후보 Top-N")
+
+    st.caption(
+        f"기준값: flag≥{thr_flag:.4f} / Beneish≥{thr_b:.4f} / ISO≥{thr_i:.4f} / Δ≥{thr_c:.4f} "
+        f"(모두 AND) | 상위 컷: flag {int((1-p_flag)*100)}%, Beneish {int((1-p_beneish)*100)}%, ISO {int((1-p_iso)*100)}%, Δ {int((1-p_change)*100)}%"
+    )
+
+    if df_candidates.empty:
+        st.info("현재 기준에서는 추가 점검 후보가 없습니다.")
+    else:
+        df_view = df_candidates.head(top_n).copy()
+        show_cols = [
+            "rank",
+            "company",
+            "year",
+            "industry",
+            "flag_score",
+            "score_beneish_part",
+            "score_iso_part",
+            "score_change_part",
+            "mscore_raw",
+            "mscore_norm",
+            "iso_score",
+            "change_score",
+            "ar_to_sales",
+            "inv_to_sales",
+            "tata",
+            "ocf_to_ni",
+            "reason_1",
+            "reason_2",
+            "reason_3",
+        ]
+        show_cols = [c for c in show_cols if c in df_view.columns]
+
+        st.dataframe(
+            df_view[show_cols],
+            use_container_width=True,
+            height=380,
         )
 
-        tab1, tab2, tab3 = st.tabs([
-            "🔍 Top-N & 일관 의심 기업",
-            "🌡️ 동종 그룹 열지도",
-            "📊 Benford 진단"
-        ])
+        top3 = df_view.head(min(3, len(df_view))).copy()
+        st.markdown("---")
+        st.subheader("Top 1~3 상세 사유(자동)")
 
-        with tab1:
-            st.subheader("Top-N 의심 기업")
-            top_table = _top_n_table(result_df, top_n)
-            st.dataframe(top_table, use_container_width=True)
+        for _, r in top3.iterrows():
+            st.markdown(
+                f"**#{int(r['rank'])} {r['company']} ({int(r['year'])})**  \n"
+                f"- 점수 분해: Beneish {float(r['score_beneish_part']):.3f} / ISO {float(r['score_iso_part']):.3f} / Δ {float(r['score_change_part']):.3f} / 합 {float(r['flag_score']):.3f}  \n"
+                f"- Top3 요인: {r['reason_1']} · {r['reason_2']} · {r['reason_3']}"
+            )
 
-            st.subheader("일관 의심 기업")
-            consistent = _consistent_suspects(result_df, baseline_df, top_n)
-            if consistent.empty:
-                st.info("현재 설정과 기준 설정(오염도 0.10, 가중치 1:1:1) 사이에 공통으로 포함된 기업이 없습니다.")
+with tab2:
+    st.subheader("동종 그룹 열지도 (비슷한 회사끼리 지표 비교)")
+
+    if df_scored.empty:
+        st.info("데이터가 없습니다.")
+    else:
+        years = sorted(df_scored["year"].dropna().unique())
+        sel_year = st.selectbox("연도 선택", years, key="peer_year")
+
+        industries = sorted(df_scored["industry"].dropna().unique())
+        sel_ind = st.selectbox("산업 선택", industries, key="peer_ind")
+
+        subset = df_scored[
+            (df_scored["year"] == sel_year) & (df_scored["industry"] == sel_ind)
+        ].copy()
+
+        if subset.shape[0] < 3:
+            st.warning("해당 연도·산업 조합에 데이터가 3개 미만이라 열지도를 만들 수 없습니다.")
+        else:
+            companies = subset["company"].unique().tolist()
+            sel_comp = st.selectbox("기준 회사 선택", companies, key="peer_comp")
+
+            focus = subset[subset["company"] == sel_comp].copy()
+            if focus.empty:
+                st.warning("선택한 회사 데이터가 없습니다.")
             else:
-                st.dataframe(consistent, use_container_width=True)
+                eps = 1e-9
+                subset["size_metric"] = np.log1p(subset["total_assets"])
+                subset["growth_metric"] = subset["sales_yoy"].fillna(0.0)
+                subset["profit_metric"] = (
+                    subset["net_income"] / (subset["sales"] + eps)
+                ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        with tab2:
-            st.subheader("동종 그룹 열지도")
-            heat_source = _peer_group_heatmap_source(result_df)
+                for c in ["size_metric", "growth_metric", "profit_metric"]:
+                    m = subset[c].mean()
+                    s = subset[c].std(ddof=0) or eps
+                    subset[c + "_z"] = (subset[c] - m) / s
 
-            years = sorted(heat_source["year"].dropna().unique().tolist())
-            industries = sorted(heat_source["industry"].dropna().astype(str).unique().tolist())
+                focus = subset[subset["company"] == sel_comp].copy()
+                focus_row = focus.iloc[0]
 
-            if years and industries:
-                col1, col2 = st.columns(2)
-                with col1:
-                    sel_year = st.selectbox("연도 선택", years, index=len(years) - 1)
-                with col2:
-                    sel_industry = st.selectbox("업종 선택", industries, index=0)
+                f_vec = np.array(
+                    [
+                        float(focus_row["size_metric_z"]),
+                        float(focus_row["growth_metric_z"]),
+                        float(focus_row["profit_metric_z"]),
+                    ]
+                )
 
-                subset = heat_source[(heat_source["year"] == sel_year) & (heat_source["industry"] == sel_industry)].copy()
+                subset["peer_dist"] = subset.apply(
+                    lambda r: np.linalg.norm(
+                        np.array(
+                            [
+                                r["size_metric_z"],
+                                r["growth_metric_z"],
+                                r["profit_metric_z"],
+                            ]
+                        )
+                        - f_vec
+                    ),
+                    axis=1,
+                )
 
-                if subset.empty:
-                    st.info("선택한 연도/업종에 해당하는 데이터가 없습니다.")
+                kmax = min(10, subset.shape[0])
+                if kmax < 3:
+                    st.info("열지도를 만들 수 없습니다.")
                 else:
-                    companies = sorted(subset["company"].astype(str).unique().tolist())
-                    focus_company = st.selectbox("기준 회사 선택", companies, index=0)
-                    k_default = min(5, len(subset))
-                    k_value = st.slider("비교 기업 수", 3, min(10, len(subset)), max(3, k_default))
-
-                    heat = _peer_group_for_focus(
-                        df=heat_source,
-                        focus_company=focus_company,
-                        focus_year=sel_year,
-                        focus_industry=sel_industry,
-                        k=k_value
+                    k = st.slider(
+                        "동종 그룹 크기 (기준 회사 포함)",
+                        min_value=3,
+                        max_value=kmax,
+                        value=min(5, subset.shape[0]),
                     )
 
-                    if heat.empty:
-                        st.info("열지도를 만들 수 없습니다.")
+                    peer = subset.nsmallest(k, "peer_dist").copy()
+
+                    metrics = [
+                        "ar_to_sales",
+                        "inv_to_sales",
+                        "tata",
+                        "ocf_to_ni",
+                        "mscore_raw",
+                        "iso_score",
+                        "change_score",
+                    ]
+                    metrics = [m for m in metrics if m in peer.columns]
+
+                    if len(metrics) == 0:
+                        st.info("열지도로 보여줄 지표가 없습니다.")
                     else:
-                        fig, ax = plt.subplots(figsize=(8, max(3, len(heat) * 0.6)))
-                        im = ax.imshow(heat.values, aspect="auto", cmap="coolwarm")
-                        ax.set_xticks(np.arange(len(heat.columns)))
-                        ax.set_xticklabels(heat.columns, rotation=30, ha="right")
-                        ax.set_yticks(np.arange(len(heat.index)))
-                        ax.set_yticklabels(heat.index)
+                        peer_z = peer.copy()
+                        for m in metrics:
+                            col_name = str(m)
+                            mm = peer[col_name].mean()
+                            ss = peer[col_name].std(ddof=0) or 1e-9
+                            peer_z[col_name + "_z_peer"] = (peer[col_name] - mm) / ss
+
+                        z_cols = [str(m) + "_z_peer" for m in metrics]
+                        z_vals = peer_z[z_cols].values
+                        labels = [
+                            f"{r['company']}_{int(r['year'])}"
+                            for _, r in peer.iterrows()
+                        ]
+
+                        label_map = meta.get("label_map", {})
+                        xlabels = [label_map.get(m, m) for m in metrics]
+
+                        fig, ax = plt.subplots(
+                            figsize=(1.25 * len(metrics), 0.55 * len(peer) + 1)
+                        )
+                        im = ax.imshow(z_vals, aspect="auto", cmap="coolwarm")
+
+                        ax.set_xticks(np.arange(len(metrics)))
+                        ax.set_xticklabels(xlabels, rotation=45, ha="right")
+                        ax.set_yticks(np.arange(len(labels)))
+                        ax.set_yticklabels(labels)
+
+                        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
                         ax.set_title("동종 그룹 내 지표 편차 (z-score)")
-                        cbar = plt.colorbar(im, ax=ax)
-                        cbar.ax.set_ylabel("z-score", rotation=90)
-                        st.pyplot(fig, clear_figure=True)
+                        st.pyplot(fig)
 
-                        st.dataframe(heat.round(3), use_container_width=True)
+                        st.caption("색이 붉을수록 동종 평균보다 높고, 푸를수록 낮습니다.")
 
-        with tab3:
-            st.subheader("Benford 진단")
+with tab3:
+    st.subheader("지표 뜻(발표 대비)")
 
-            years = sorted(result_df["year"].dropna().unique().tolist())
-            industries = sorted(result_df["industry"].dropna().astype(str).unique().tolist())
+    st.markdown(
+        """
+- AR/Sales(매출채권/매출액): 매출 대비 채권이 과도하면 매출 인식/회수 지연 가능성 신호
+- Inv/Sales(재고자산/매출액): 매출 대비 재고가 과도하면 재고 과대계상/판매부진 가능성 신호
+- TATA((NI-OCF)/자산): 이익은 큰데 현금이 안 따라오면 발생주의(비현금) 조정이 커진 신호
+- OCF/NI(영업CF/순이익): 순이익 대비 영업현금흐름이 낮거나 음수면 이익의 질 저하 신호
 
-            if years and industries:
-                col1, col2 = st.columns(2)
-                with col1:
-                    ben_year = st.selectbox("진단 연도", years, index=len(years) - 1, key="ben_year")
-                with col2:
-                    ben_industry = st.selectbox("진단 업종", industries, index=0, key="ben_industry")
+- mscore_raw(간이 Beneish): 동종(연도/산업) 내에서 위 지표들을 표준화(z)한 뒤
+  mscore_raw = z(AR/Sales) + z(Inv/Sales) + z(TATA) − z(OCF/NI)
 
-                stats = benford_detail.get((ben_year, ben_industry), None)
+- iso_score(ISO 이상치): 4개 지표 조합이 다변량 관점에서 “특이한 조합”인지 Isolation Forest로 점수화
 
-                if stats is None:
-                    st.info("선택한 그룹의 Benford 진단 결과가 없습니다.")
-                else:
-                    if stats["applicable"]:
-                        st.success(f"적용 가능: n={stats['n']}, span={stats['span']:.1f}, MAD={stats['mad']:.4f}")
-                    else:
-                        span_text = f"{stats['span']:.1f}" if not pd.isna(stats["span"]) else "계산 불가"
-                        st.warning(f"적용 주의: n={stats['n']}, span={span_text}, MAD={stats['mad']:.4f}")
-                        st.caption(f"사유: {stats['reason_text']}")
-
-                    fig, ax = plt.subplots(figsize=(8, 4))
-                    x = np.arange(1, 10)
-                    width = 0.38
-                    ax.bar(x - width / 2, stats["obs"], width=width, label="관측 비율")
-                    ax.bar(x + width / 2, stats["exp"], width=width, label="Benford 기대 비율")
-                    ax.set_xticks(x)
-                    ax.set_xlabel("첫 자리 숫자")
-                    ax.set_ylabel("비율")
-                    ax.set_title("Benford 분포 비교")
-                    ax.legend()
-                    st.pyplot(fig, clear_figure=True)
-
-                    benford_df = pd.DataFrame({
-                        "digit": stats["digits"],
-                        "observed": stats["obs"],
-                        "expected": stats["exp"]
-                    })
-                    st.dataframe(benford_df.round(4), use_container_width=True)
-
-    except Exception as e:
-        st.error(f"처리 중 오류가 발생했습니다: {e}")
-else:
-    st.info("분석할 파일을 업로드해 주세요.")
+- change_score(전년대비 변화): 같은 회사의 전년 대비 지표 변화(Δ)가 동종 대비 얼마나 급격한지 점수화
+"""
+    )
