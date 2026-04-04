@@ -25,6 +25,7 @@ def reset_session_for_new_file(filename: str):
     st.session_state["base_top_ids"] = None
     st.session_state["base_params"] = None
 
+
 def _normalize_column_name(col):
     col = str(col)
     col = col.replace("\ufeff", "")
@@ -38,6 +39,22 @@ def _normalized_key(text):
     text = _normalize_column_name(text)
     text = text.lower().replace(" ", "").replace("_", "")
     return text
+
+
+def _read_uploaded_file(uploaded):
+    name = uploaded.name.lower()
+
+    if name.endswith(".csv"):
+        raw = uploaded.getvalue()
+        for enc in ["utf-8-sig", "cp949", "utf-8"]:
+            try:
+                return pd.read_csv(io.BytesIO(raw), encoding=enc)
+            except Exception:
+                pass
+        return pd.read_csv(io.BytesIO(raw))
+
+    return pd.read_excel(uploaded)
+
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -89,6 +106,7 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
 def _clean_numeric_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     df = df.copy()
     for col in cols:
@@ -102,12 +120,15 @@ def _clean_numeric_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
 
 def _norm01(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=float)
+    if len(x) == 0:
+        return x
     mn = np.nanmin(x)
     mx = np.nanmax(x)
     return (x - mn) / (mx - mn + 1e-9)
 
 
 def _safe_zscore(series: pd.Series) -> pd.Series:
+    series = pd.to_numeric(series, errors="coerce")
     m = series.mean()
     s = series.std(ddof=0)
     if s is None or s == 0 or np.isnan(s):
@@ -146,6 +167,23 @@ def run_pipeline(
     df["row_id"] = df.index + 1
     df["year"] = pd.to_numeric(df["year"], errors="coerce")
 
+    df = df.dropna(
+        subset=[
+            "company",
+            "year",
+            "sales",
+            "ar",
+            "inventory",
+            "total_assets",
+            "ocf",
+            "net_income",
+        ]
+    ).copy()
+
+    df["company"] = df["company"].astype(str).str.strip()
+    df["industry"] = df["industry"].astype(str).str.strip().replace("", "미지정")
+    df["year"] = df["year"].astype(int)
+
     eps = 1e-9
 
     df["ar_to_sales"] = df["ar"] / (df["sales"] + eps)
@@ -153,29 +191,19 @@ def run_pipeline(
     df["ocf_to_ni"] = df["ocf"] / (df["net_income"] + eps)
     df["tata"] = (df["net_income"] - df["ocf"]) / (df["total_assets"] + eps)
 
-    df = df.sort_values(["company", "year"])
+    df = df.sort_values(["company", "year"]).reset_index(drop=True)
     df["sales_yoy"] = (
         df.groupby("company")["sales"].pct_change().fillna(0.0) * 100.0
     )
 
     metrics = ["ar_to_sales", "inv_to_sales", "tata", "ocf_to_ni"]
 
-    def zscore_group(g: pd.DataFrame, cols: list):
-        g = g.copy()
-        for c in cols:
-            col_name = str(c)
-            g[col_name + "_z"] = _safe_zscore(g[col_name])
-        return g
+    for c in metrics:
+        if group_mode == "year_industry":
+            df[c + "_z"] = df.groupby(["year", "industry"])[c].transform(_safe_zscore)
+        else:
+            df[c + "_z"] = _safe_zscore(df[c])
 
-    if group_mode == "year_industry":
-        df = (
-            df.groupby(["year", "industry"], group_keys=False)
-            .apply(zscore_group, cols=metrics)
-            .reset_index(drop=True)
-        )
-    else:
-        df = zscore_group(df, metrics).reset_index(drop=True)
-    
     z_ar = df.get("ar_to_sales_z", pd.Series(0, index=df.index))
     z_inv = df.get("inv_to_sales_z", pd.Series(0, index=df.index))
     z_tata = df.get("tata_z", pd.Series(0, index=df.index))
@@ -200,20 +228,17 @@ def run_pipeline(
 
     df["iso_score"] = iso_norm
 
-    df = df.sort_values(["company", "year"])
+    df = df.sort_values(["company", "year"]).reset_index(drop=True)
     for m in metrics:
         df[m + "_d1"] = df.groupby("company")[m].diff().fillna(0.0)
 
     delta_cols = [m + "_d1" for m in metrics]
 
-    if group_mode == "year_industry":
-        df = (
-            df.groupby(["year", "industry"], group_keys=False)
-            .apply(zscore_group, cols=delta_cols)
-            .reset_index(drop=True)
-        )
-    else:
-        df = zscore_group(df, delta_cols).reset_index(drop=True)
+    for c in delta_cols:
+        if group_mode == "year_industry":
+            df[c + "_z"] = df.groupby(["year", "industry"])[c].transform(_safe_zscore)
+        else:
+            df[c + "_z"] = _safe_zscore(df[c])
 
     change_raw = np.zeros(df.shape[0], dtype=float)
     for m in metrics:
@@ -354,7 +379,7 @@ st.markdown(
 
 4. 하단 탭에서   
    - 🔍 **Top-N 의심 리스트 & Top 1~3 적발 사유**,   
-   - 🌡️ **동종 그룹 열지도(동종 업계끼리 비교)**,      
+   - 🌡️ **동종 그룹 열지도(동종 업계끼리 비교)**  
    를 확인할 수 있습니다.
 """
 )
@@ -367,10 +392,7 @@ if uploaded is None:
 if "uploaded_name" not in st.session_state or st.session_state["uploaded_name"] != uploaded.name:
     reset_session_for_new_file(uploaded.name)
 
-if uploaded.name.lower().endswith(".csv"):
-    df_raw = pd.read_csv(uploaded)
-else:
-    df_raw = pd.read_excel(uploaded)
+df_raw = _read_uploaded_file(uploaded)
 
 st.caption(f"업로드된 데이터 크기: {df_raw.shape[0]}행 × {df_raw.shape[1]}열")
 with st.expander("원본 일부 미리보기", expanded=False):
@@ -557,12 +579,11 @@ with tab2:
                     else:
                         peer_z = peer.copy()
                         for m in metrics:
-                            col_name = str(m)
-                            mm = peer[col_name].mean()
-                            ss = peer[col_name].std(ddof=0) or 1e-9
-                            peer_z[col_name + "_z_peer"] = (peer[col_name] - mm) / ss
+                            mm = peer[m].mean()
+                            ss = peer[m].std(ddof=0) or 1e-9
+                            peer_z[m + "_z_peer"] = (peer[m] - mm) / ss
 
-                        z_cols = [str(m) + "_z_peer" for m in metrics]
+                        z_cols = [m + "_z_peer" for m in metrics]
                         z_vals = peer_z[z_cols].values
                         labels = [
                             f"{r['company']}_{int(r['year'])}"
