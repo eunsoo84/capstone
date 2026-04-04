@@ -171,10 +171,11 @@ def run_pipeline(
         df = (
             df.groupby(["year", "industry"], group_keys=False)
             .apply(zscore_group, cols=metrics)
+            .reset_index(drop=True)
         )
     else:
-        df = zscore_group(df, metrics)
-
+        df = zscore_group(df, metrics).reset_index(drop=True)
+    
     z_ar = df.get("ar_to_sales_z", pd.Series(0, index=df.index))
     z_inv = df.get("inv_to_sales_z", pd.Series(0, index=df.index))
     z_tata = df.get("tata_z", pd.Series(0, index=df.index))
@@ -209,9 +210,10 @@ def run_pipeline(
         df = (
             df.groupby(["year", "industry"], group_keys=False)
             .apply(zscore_group, cols=delta_cols)
+            .reset_index(drop=True)
         )
     else:
-        df = zscore_group(df, delta_cols)
+        df = zscore_group(df, delta_cols).reset_index(drop=True)
 
     change_raw = np.zeros(df.shape[0], dtype=float)
     for m in metrics:
