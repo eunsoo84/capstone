@@ -384,7 +384,7 @@ try:
         w_change=w_change,
     )
 except Exception as e:
-    st.error(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
+    st.exception(e)
     st.stop()
 
 thr_flag = float(df_scored["flag_score"].quantile(p_flag))
