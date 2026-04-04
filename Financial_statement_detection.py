@@ -25,9 +25,23 @@ def reset_session_for_new_file(filename: str):
     st.session_state["base_top_ids"] = None
     st.session_state["base_params"] = None
 
+def _normalize_column_name(col):
+    col = str(col)
+    col = col.replace("\ufeff", "")
+    col = col.replace("\u00a0", " ")
+    col = col.strip()
+    col = " ".join(col.split())
+    return col
+
+
+def _normalized_key(text):
+    text = _normalize_column_name(text)
+    text = text.lower().replace(" ", "").replace("_", "")
+    return text
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    df.columns = [_normalize_column_name(c) for c in df.columns]
 
     aliases = {
         "company": ["company", "회사명", "법인명"],
@@ -41,11 +55,14 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         "net_income": ["net_income", "당기순이익"],
     }
 
+    current_lookup = {_normalized_key(c): c for c in df.columns}
+
     col_map = {}
     for canonical, cands in aliases.items():
         for c in cands:
-            if c in df.columns:
-                col_map[c] = canonical
+            key = _normalized_key(c)
+            if key in current_lookup:
+                col_map[current_lookup[key]] = canonical
                 break
 
     df = df.rename(columns=col_map)
@@ -71,7 +88,6 @@ def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["industry"] = "미지정"
 
     return df
-
 
 def _clean_numeric_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     df = df.copy()
